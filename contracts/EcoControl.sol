@@ -37,7 +37,7 @@ contract EcoControl {
     mapping(uint256 => Enterprise) public enterprises;
 
     modifier onlyOwner () {
-        require(msg.sender == owner, "onlyowner can call this function" );
+        require(msg.sender == owner, "Only owner can call this function" );
         _; // Выполнить остальную часть функции
     }
 
