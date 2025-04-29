@@ -104,6 +104,19 @@ async function main() {
   }
 
   console.log("\nСкрипт развертывания и настройки завершен!");
+  const addresses = {
+    ecoControl: ecoControlAddress,
+    ecoToken: ecoTokenAddress
+  };
+  console.log("Развернутые адреса:", addresses);
+
+  // --- Добавляем запись адресов в файл ---
+  const fs = require('fs'); // Импортируем модуль для работы с файловой системой
+  fs.writeFileSync('deployed-addresses.json', JSON.stringify(addresses, null, 2));
+  console.log("Адреса контрактов сохранены в deployed-addresses.json");
+  // --- Конец добавления ---
+
+
   console.log("Адрес EcoControl для взаимодействия:", ecoControlAddress);
   console.log("Адрес EcoToken для взаимодействия:", ecoTokenAddress);
   console.log("Аккаунт владельца:", deployer.address);
