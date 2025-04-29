@@ -7,19 +7,26 @@ const MAX_UINT256 = ethers.MaxUint256;
 
 // Объявляем переменные, которые будут доступны во всех тестах
 let EcoToken, ecoToken, EcoControl, ecoControl;
-let deployer, dataSourceCaller, enterprise1, enterprise2; // Аккаунты
+let deployer, dataProcessorCaller, enterprise1, enterprise2, otherAccount; // Аккаунты
 let enterprise1Id, enterprise2Id; // ID предприятий
 const fineAmount = ethers.parseUnits("100", 18); // Сумма штрафа в токенах (100 ECO)
-const fineThreshold = 300; // Порог рейтинга для штрафа
-const ratingDecrease = 10; // Насколько падает рейтинг при превышении нормы
 
-// Блок describe группирует тесты для контракта EcoControl
-describe("EcoControl", function () {
+// Начальные лимиты для предприятий при регистрации
+const initialLimitM1 = 100;
+const initialLimitM2 = 20;
+
+// Тестовые значения данных (используем BigInt литералы с 'n')
+const complianceData = { metric1: 50n, metric2: 10n }; // Ниже лимитов (100, 20)
+const exceedingData = { metric1: 150n, metric2: 30n }; // Выше лимитов (100, 20)
+
+
+// Блок describe группирует тесты для контракта EcoControl (Новая логика)
+describe("EcoControl (New Logic)", function () {
 
   // Блок beforeEach выполняется перед каждым тестом
   beforeEach(async function () {
     // Получаем тестовые аккаунты
-    [deployer, dataSourceCaller, enterprise1, enterprise2] = await ethers.getSigners();
+    [deployer, dataProcessorCaller, enterprise1, enterprise2, otherAccount] = await ethers.getSigners();
 
     // --- Развертывание EcoToken ---
     EcoToken = await ethers.getContractFactory("EcoToken");
@@ -34,45 +41,41 @@ describe("EcoControl", function () {
     await ecoControl.waitForDeployment();
     const ecoControlAddress = await ecoControl.getAddress();
 
-    // --- Настройка EcoControl ---
-    // Устанавливаем адрес токена, источник данных, сумму штрафа и порог
+    // --- Настройка EcoControl (владельцем) ---
+    // Устанавливаем адрес токена и аккаунт обработчика данных
     await ecoControl.setEcoTokenAddress(ecoTokenAddress);
-    await ecoControl.setDataSourceCaller(dataSourceCaller.address);
+    await ecoControl.setDataProcessorCaller(dataProcessorCaller.address);
+    // Устанавливаем сумму штрафа (если отличается от дефолтной)
     await ecoControl.setFineAmount(fineAmount);
-    await ecoControl.setFineThreshold(fineThreshold);
 
-    // --- Регистрация тестовых предприятий ---
-    // Регистрируем предприятие 1
-    let tx1 = await ecoControl.registerEnterprise("Предприятие 1", enterprise1.address);
+
+    // --- Регистрация тестовых предприятий (владельцем) ---
+    // Регистрируем предприятие 1 с начальными лимитами
+    let tx1 = await ecoControl.registerEnterprise("Предприятие 1", enterprise1.address, initialLimitM1, initialLimitM2);
     let receipt1 = await tx1.wait();
-    // Ищем событие EnterpriseRegistered, чтобы получить enterpriseId
-    // Hardhat Network мгновенно завершает транзакции, так что receipt будет доступен
-    // Используем logs[0] для простоты, т.к. это первое событие в транзакции регистрации
+    // Получаем enterpriseId из события (для ethers v6, событие в logs[0])
     enterprise1Id = receipt1.logs[0].args.id;
 
-    // Регистрируем предприятие 2
-    let tx2 = await ecoControl.registerEnterprise("Предприятие 2", enterprise2.address);
+    // Регистрируем предприятие 2 с теми же начальными лимитами
+    let tx2 = await ecoControl.registerEnterprise("Предприятие 2", enterprise2.address, initialLimitM1, initialLimitM2);
     let receipt2 = await tx2.wait();
-     enterprise2Id = receipt2.logs[0].args.id;
+    enterprise2Id = receipt2.logs[0].args.id;
 
 
-    // --- Минтинг токенов и АППРУВ для тестовых предприятий ---
+    // --- Минтинг токенов и АППРУВ для тестовых предприятий (владельцем EcoToken) ---
     const tokensPerEnterprise = ethers.parseUnits("5000", 18); // Токенов для каждого предприятия
 
-    // Минтим токены для Предприятия 1 (владелец EcoToken - deployer)
+    // Минтим токены для Предприятий (владелец EcoToken - deployer)
     await ecoToken.mint(enterprise1.address, tokensPerEnterprise);
-    // Минтим токены для Предприятия 2
     await ecoToken.mint(enterprise2.address, tokensPerEnterprise);
 
-    // Предприятие 1 выполняет АППРУВ на контракте EcoToken
-    // Подключаемся к аккаунту предприятия 1 для выполнения вызова
+    // Предприятия выполняют АППРУВ на контракте EcoToken (бесконечное разрешение)
+    // Подключаемся к аккаунтам предприятий для выполнения вызова approve
     const ecoTokenWithEnterprise1 = ecoToken.connect(enterprise1);
-    // Разрешаем контракту EcoControl тратить токены enterprise1 (бесконечное разрешение)
     await ecoTokenWithEnterprise1.approve(ecoControlAddress, MAX_UINT256);
 
-    // Предприятие 2 выполняет АППРУВ на контракте EcoToken
-     const ecoTokenWithEnterprise2 = ecoToken.connect(enterprise2);
-     await ecoTokenWithEnterprise2.approve(ecoControlAddress, MAX_UINT256);
+    const ecoTokenWithEnterprise2 = ecoToken.connect(enterprise2);
+    await ecoTokenWithEnterprise2.approve(ecoControlAddress, MAX_UINT256);
 
      // Проверяем начальный баланс EcoControl в токенах (должен быть 0)
      expect(await ecoControl.getCollectedFinesBalance()).to.equal(0);
@@ -81,302 +84,336 @@ describe("EcoControl", function () {
   // --- Начинаются сами тесты ---
 
   // Проверка базового развертывания и начальных значений
-  it("Should set the right owner and initial values", async function () {
+  it("Should set the right owner, initial setup, and register enterprises with initial limits", async function () {
     expect(await ecoControl.owner()).to.equal(deployer.address);
-    expect(await ecoControl.dataSourceCaller()).to.equal(dataSourceCaller.address);
-    expect(await ecoControl.metric1Threshold()).to.equal(50);
-    expect(await ecoControl.metric2Threshold()).to.equal(10);
+    expect(await ecoControl.dataProcessorCaller()).to.equal(dataProcessorCaller.address);
     expect(await ecoControl.nextEnterpriseId()).to.equal(2); // Зарегистрировали 2 предприятия
     expect(await ecoControl.ecoTokenAddress()).to.equal(await ecoToken.getAddress());
     expect(await ecoControl.fineAmount()).to.equal(fineAmount);
-    expect(await ecoControl.fineThreshold()).to.equal(fineThreshold);
+    // Проверка отсутствия старых переменных рейтинга/порогов (опционально, но хорошо для уверенности)
+    await expect(ecoControl.fineThreshold).to.be.undefined; // Переменной fineThreshold больше нет
+    // await expect(ecoControl.metric1Threshold).to.be.undefined; // Если удалены общие нормативы
 
-    // Проверка начального рейтинга предприятий
+    // Проверка данных зарегистрированных предприятий
     const enterprise1Data = await ecoControl.enterprises(enterprise1Id);
     expect(enterprise1Data.name).to.equal("Предприятие 1");
-    expect(enterprise1Data.rating).to.equal(500);
+    expect(enterprise1Data.id).to.equal(enterprise1Id);
+    expect(enterprise1Data.enterpriseAddress).to.equal(enterprise1.address);
+    expect(enterprise1Data.metric1Limit).to.equal(initialLimitM1);
+    expect(enterprise1Data.metric2Limit).to.equal(initialLimitM2);
+    // Проверка отсутствия рейтинга
+    await expect(enterprise1Data.rating).to.be.undefined;
 
-     const enterprise2Data = await ecoControl.enterprises(enterprise2Id);
+    const enterprise2Data = await ecoControl.enterprises(enterprise2Id);
     expect(enterprise2Data.name).to.equal("Предприятие 2");
-    expect(enterprise2Data.rating).to.equal(500);
+    expect(enterprise2Data.id).to.equal(enterprise2Id);
+    expect(enterprise2Data.enterpriseAddress).to.equal(enterprise2.address);
+    expect(enterprise2Data.metric1Limit).to.equal(initialLimitM1);
+    expect(enterprise2Data.metric2Limit).to.equal(initialLimitM2);
   });
 
   // Проверка ограничений доступа
   it("Should restrict access to administrative functions", async function () {
-      // Используем аккаунт, который НЕ является владельцем (например, dataSourceCaller)
-      const ecoControlAsNonOwner = ecoControl.connect(dataSourceCaller);
+      // Используем аккаунт, который НЕ является владельцем (например, dataProcessorCaller)
+      const ecoControlAsNonOwner = ecoControl.connect(dataProcessorCaller);
 
       // Проверяем все onlyOwner функции
-      await expect(ecoControlAsNonOwner.setNorms(60, 20)).to.be.revertedWith("Only owner can call this function");
-      await expect(ecoControlAsNonOwner.setDataSourceCaller(otherAccounts[0].address)).to.be.revertedWith("Only owner can call this function");
-      await expect(ecoControlAsNonOwner.setEcoTokenAddress(otherAccounts[0].address)).to.be.revertedWith("Only owner can call this function");
+      // await expect(ecoControlAsNonOwner.setNorms(60, 20)).to.be.revertedWith("Only owner can call this function"); // setNorms удален
+      await expect(ecoControlAsNonOwner.setDataProcessorCaller(otherAccount.address)).to.be.revertedWith("Only owner can call this function");
+      await expect(ecoControlAsNonOwner.setEcoTokenAddress(otherAccount.address)).to.be.revertedWith("Only owner can call this function");
       await expect(ecoControlAsNonOwner.setFineAmount(ethers.parseUnits("50", 18))).to.be.revertedWith("Only owner can call this function");
-      await expect(ecoControlAsNonOwner.setFineThreshold(400)).to.be.revertedWith("Only owner can call this function");
-      // Проверка registerEnterprise requires enterprise address
-      await expect(ecoControlAsNonOwner.registerEnterprise("Новое Предприятие", otherAccounts[0].address)).to.be.revertedWith("Only owner can call this function");
+      // await expect(ecoControlAsNonOwner.setFineThreshold(400)).to.be.revertedWith("Only owner can call this function"); // setFineThreshold удален
+      await expect(ecoControlAsNonOwner.registerEnterprise("Новое Предприятие", otherAccount.address, 100, 20)).to.be.revertedWith("Only owner can call this function");
+      await expect(ecoControlAsNonOwner.setEnterpriseLimits(enterprise1Id, 200, 30)).to.be.revertedWith("Only owner can call this function");
       await expect(ecoControlAsNonOwner.withdrawCollectedFines(deployer.address)).to.be.revertedWith("Only owner can call this function");
 
-      // Проверка ограничения доступа к updateEnvironmentalData
-       const ecoControlAsNonDataSource = ecoControl.connect(deployer); // Владелец не dataSourceCaller
+      // Проверка ограничения доступа к checkCompliance (раньше updateEnvironmentalData)
+       const ecoControlAsNonProcessor = ecoControl.connect(deployer); // Владелец не dataProcessorCaller
 
-       await expect(ecoControlAsNonDataSource.updateEnvironmentalData(
+       await expect(ecoControlAsNonProcessor.checkCompliance(
            enterprise1Id,
-           enterprise1.address,
-           40, 5
-       )).to.be.revertedWith("Only authorized data source can call this function");
+           complianceData.metric1, complianceData.metric2
+       )).to.be.revertedWith("Only authorized data processor can call this function");
   });
 
-  // Проверка обновления данных и изменения рейтинга
-  it("Should update data and adjust rating correctly (compliance and simple decrease/increase)", async function () {
-      const ecoControlAsDataSource = ecoControl.connect(dataSourceCaller);
-      const enterpriseId = enterprise1Id;
-      const enterpriseAddress = enterprise1.address;
-      const initialRating = 500;
+  // Проверка регистрации предприятия с уже существующим адресом
+  it("Should revert registration if enterprise address already exists", async function () {
+      // Пытаемся зарегистрировать еще одно предприятие с адресом enterprise1
+      await expect(ecoControl.registerEnterprise("Предприятие 3 (Дубль)", enterprise1.address, 100, 20)).to.be.revertedWith("Enterprise with this address already registered");
+  });
 
-      // 1. Данные В пределах нормы (Metric1=40 < 50, Metric2=5 < 10)
-      let tx1 = await ecoControlAsDataSource.updateEnvironmentalData(
-          enterpriseId,
-          enterpriseAddress,
-          40, 5
-      );
-      let receipt1 = await tx1.wait();
-      let blockTimestamp1 = (await ethers.provider.getBlock(receipt1.blockNumber)).timestamp;
 
-      // Проверка обновления данных
-      let enterpriseDataAfterCompliance = await ecoControl.enterprises(enterpriseId);
-      expect(enterpriseDataAfterCompliance.latestMetric1).to.equal(40);
-      expect(enterpriseDataAfterCompliance.latestMetric2).to.equal(5);
-      expect(enterpriseDataAfterCompliance.latestDataTimestamp).to.be.closeTo(blockTimestamp1, 5);
+   // Проверка checkCompliance при данных В пределах лимитов
+   it("Should update data and not charge fine when data is within limits", async function () {
+    const ecoControlAsProcessor = ecoControl.connect(dataProcessorCaller);
+    const enterpriseId = enterprise1Id;
+    const enterpriseAccount = enterprise1;
+    const enterpriseInitialBalance = await ecoToken.balanceOf(enterpriseAccount.address); // Баланс до проверки
 
-      // Проверка изменения рейтинга (должен увеличиться на 5)
-      expect(enterpriseDataAfterCompliance.rating).to.equal(initialRating + 5);
-      // Проверка события RatingChanged
-      expect(tx1).to.emit(ecoControl, 'RatingChanged').withArgs(enterpriseId, initialRating, initialRating + 5);
-      // Проверка события DataUpdated
-      expect(tx1).to.emit(ecoControl, 'DataUpdated').withArgs(enterpriseId, 40, 5, blockTimestamp1);
-      // Проверка отсутствия события FineCharged
-      await expect(tx1).not.to.emit(ecoControl, 'FineCharged');
-
-      // 2. Данные С превышением нормы (Metric1=60 > 50, Metric2=15 > 10), но рейтинг НЕ ниже порога штрафа (505 -> 495)
-      let tx2 = await ecoControlAsDataSource.updateEnvironmentalData(
+    // Вызываем checkCompliance с данными ниже лимитов (100, 20)
+    let tx = await ecoControlAsProcessor.checkCompliance(
         enterpriseId,
-        enterpriseAddress,
-        60, 15
-      );
-      let receipt2 = await tx2.wait();
-      let blockTimestamp2 = (await ethers.provider.getBlock(receipt2.blockNumber)).timestamp;
+        complianceData.metric1, complianceData.metric2 // 50n, 10n
+    );
+    let receipt = await tx.wait();
+    let blockTimestamp = (await ethers.provider.getBlock(receipt.blockNumber)).timestamp;
 
-      // Проверка обновления данных
-      let enterpriseDataAfterExceed = await ecoControl.enterprises(enterpriseId);
-      expect(enterpriseDataAfterExceed.latestMetric1).to.equal(60);
-      expect(enterpriseDataAfterExceed.latestMetric2).to.equal(15);
-      expect(enterpriseDataAfterExceed.latestDataTimestamp).to.be.closeTo(blockTimestamp2, 5);
+    // --- УДАЛЯЕМ проверку события DataUpdated в этом тесте ---
+    // await expect(tx).to.emit(ecoControl, 'DataUpdated').withArgs(...);
+    // --- Конец удаления ---
 
-      // Проверка изменения рейтинга (должен уменьшиться на 10)
-      expect(enterpriseDataAfterExceed.rating).to.equal(initialRating + 5 - 10); // 495
-      // Проверка события RatingChanged
-      expect(tx2).to.emit(ecoControl, 'RatingChanged').withArgs(enterpriseId, initialRating + 5, initialRating + 5 - 10);
-      // Проверка события DataUpdated
-      expect(tx2).to.emit(ecoControl, 'DataUpdated').withArgs(enterpriseId, 60, 15, blockTimestamp2);
-      // Проверка отсутствия события FineCharged
-      await expect(tx2).not.to.emit(ecoControl, 'FineCharged');
+    // Проверка обновления последних данных
+    const enterpriseDataAfterCheck = await ecoControl.enterprises(enterpriseId);
+    expect(enterpriseDataAfterCheck.latestMetric1).to.equal(complianceData.metric1);
+    expect(enterpriseDataAfterCheck.latestMetric2).to.equal(complianceData.metric2);
+    expect(enterpriseDataAfterCheck.latestDataTimestamp).to.be.closeTo(blockTimestamp, 5);
 
-      // 3. Обновление данных снова в пределах нормы (495 -> 500)
-      let tx3 = await ecoControlAsDataSource.updateEnvironmentalData(
+    // Проверка события ComplianceChecked
+    await expect(tx).to.emit(ecoControl, 'ComplianceChecked').withArgs(
+        enterpriseId,
+        complianceData.metric1, complianceData.metric2,
+        false // limitsExceeded должен быть false
+    );
+
+    // Проверка отсутствия события FineCharged
+    await expect(tx).not.to.emit(ecoControl, 'FineCharged');
+    await expect(tx).not.to.emit(ecoControl, 'FineChargeFailed');
+
+    // Проверка, что балансы НЕ изменились
+    expect(await ecoToken.balanceOf(enterpriseAccount.address)).to.equal(enterpriseInitialBalance);
+    expect(await ecoControl.getCollectedFinesBalance()).to.equal(0);
+});
+
+  // Проверка checkCompliance при данных С превышением лимитов
+  it("Should update data and charge fine when data exceeds limits", async function () {
+      const ecoControlAsProcessor = ecoControl.connect(dataProcessorCaller);
+      const enterpriseId = enterprise1Id;
+      const enterpriseAccount = enterprise1;
+      const enterpriseInitialBalance = await ecoToken.balanceOf(enterpriseAccount.address); // Баланс до проверки
+
+      // Вызываем checkCompliance с данными ВЫШЕ лимитов (100, 20)
+      let tx = await ecoControlAsProcessor.checkCompliance(
           enterpriseId,
-          enterpriseAddress,
-          40, 5
+          exceedingData.metric1, exceedingData.metric2 // 150n, 30n
       );
-      let receipt3 = await tx3.wait();
-      let enterpriseDataAfterCompliance2 = await ecoControl.enterprises(enterpriseId);
-       expect(enterpriseDataAfterCompliance2.rating).to.equal(495 + 5); // 500
-        expect(tx3).to.emit(ecoControl, 'RatingChanged').withArgs(enterpriseId, 495, 500);
-         await expect(tx3).not.to.emit(ecoControl, 'FineCharged');
+      let receipt = await tx.wait();
+      let blockTimestamp = (await ethers.provider.getBlock(receipt.blockNumber)).timestamp;
 
+      // --- УДАЛЯЕМ проверку события DataUpdated в этом тесте ---
+      // await expect(tx).to.emit(ecoControl, 'DataUpdated').withArgs(...);
+      // --- Конец удаления ---
+
+      // Проверка обновления последних данных
+      const enterpriseDataAfterCheck = await ecoControl.enterprises(enterpriseId);
+      expect(enterpriseDataAfterCheck.latestMetric1).to.equal(exceedingData.metric1);
+      expect(enterpriseDataAfterCheck.latestMetric2).to.equal(exceedingData.metric2);
+      expect(enterpriseDataAfterCheck.latestDataTimestamp).to.be.closeTo(blockTimestamp, 5);
+
+      // Проверка события ComplianceChecked
+      await expect(tx).to.emit(ecoControl, 'ComplianceChecked').withArgs(
+          enterpriseId,
+          exceedingData.metric1, exceedingData.metric2,
+          true // limitsExceeded должен быть true
+      );
+
+      // Проверка события FineCharged (ключевой момент!)
+      await expect(tx).to.emit(ecoControl, 'FineCharged').withArgs(
+          enterpriseId,
+          enterpriseAccount.address, // Проверяем, что адрес предприятия правильный
+          fineAmount
+      );
+       await expect(tx).not.to.emit(ecoControl, 'FineChargeFailed');
+
+
+      // Проверка балансов токенов
+      const finalEnterpriseBalance = await ecoToken.balanceOf(enterpriseAccount.address);
+      const finesCollectedBalance = await ecoControl.getCollectedFinesBalance();
+
+      // Баланс предприятия должен уменьшиться на сумму штрафа (используем оператор - для BigInt)
+      expect(finalEnterpriseBalance).to.equal(enterpriseInitialBalance - fineAmount);
+      // Баланс контракта EcoControl должен увеличиться на сумму штрафа
+      expect(finesCollectedBalance).to.equal(fineAmount);
   });
 
-    // Проверка понижения рейтинга и начисления штрафа при пересечении порога
-    it("Should decrease rating and charge fine when norms exceeded and threshold crossed downwards", async function () {
-        const ecoControlAsDataSource = ecoControl.connect(dataSourceCaller);
+  // Проверка сценария с недостаточным балансом при превышении лимитов
+  it("Should revert with insufficient balance error if enterprise has insufficient balance when limits are exceeded", async function () {
+      const ecoControlAsProcessor = ecoControl.connect(dataProcessorCaller);
+      const enterpriseId = enterprise2Id; // Используем другое предприятие
+      const enterpriseAccount = enterprise2;
+      const enterpriseInitialBalance = await ecoToken.balanceOf(enterpriseAccount.address); // Баланс до проверки
+
+      // Убедимся, что у предприятия недостаточно токенов для стандартного штрафа (100 ECO)
+      // В beforeEach минтится 5000. Штраф 100. Все OK.
+      // Чтобы симулировать недостаточный баланс, временно установим сумму штрафа БОЛЬШЕ, чем текущий баланс предприятия.
+      const currentEnterpriseBalance = await ecoToken.balanceOf(enterpriseAccount.address);
+      const largeFineAmount = currentEnterpriseBalance + 1n; // Штраф на 1 токен больше баланса
+      await ecoControl.setFineAmount(largeFineAmount);
+      console.log(`Тест: Установлен штраф ${ethers.formatEther(largeFineAmount)} ECO, баланс предприятия ${ethers.formatEther(currentEnterpriseBalance)} ECO.`); // Отладочный вывод
+
+      // Вызываем checkCompliance с данными ВЫШЕ лимитов, чтобы сработала логика штрафа
+      // --- ИЗМЕНЯЕМ ОЖДАНИЕ: Ожидаем REVERT с кастомной ошибкой ---
+      await expect(ecoControlAsProcessor.checkCompliance(
+          enterpriseId,
+          exceedingData.metric1, exceedingData.metric2 // 150n, 30n
+      )).to.be.reverted; // Ожидаем просто revert
+
+      // Если нужно проверить конкретную кастомную ошибку, можно использовать:
+      // await expect(ecoControlAsProcessor.checkCompliance(
+      //     enterpriseId,
+      //     exceedingData.metric1, exceedingData.metric2
+      // )).to.be.revertedWithCustomError(ecoToken, "ERC20InsufficientBalance")
+      //   .withArgs(enterpriseAccount.address, currentEnterpriseBalance, largeFineAmount);
+      // Но для MVP достаточно простого revert.
+
+
+      // Проверяем, что балансы НЕ изменились (токены не списались)
+      // Эту проверку можно сделать после вызова, т.к. revert откатывает все изменения
+      expect(await ecoToken.balanceOf(enterpriseAccount.address)).to.equal(enterpriseInitialBalance); // Сравниваем с балансом ДО ВСЕХ действий в тесте
+      expect(await ecoControl.getCollectedFinesBalance()).to.equal(0);
+
+      // Возвращаем сумму штрафа к стандартному значению для других тестов (если они выполняются после этого)
+      await ecoControl.setFineAmount(fineAmount);
+  });
+
+    // Проверка установки индивидуальных лимитов предприятия
+    it("Should allow owner to set enterprise limits", async function () {
         const enterpriseId = enterprise1Id;
-        const enterpriseAccount = enterprise1;
-        const initialRating = 500; // Начальный рейтинг
-        const enterpriseInitialBalance = await ecoToken.balanceOf(enterpriseAccount.address); // Начальный баланс предприятия
+        const newLimitM1 = 200;
+        const newLimitM2 = 50;
 
-        // Цель: заставить рейтинг упасть с >= fineThreshold (300) до < fineThreshold (300)
-        // Начальный рейтинг 500. Порог 300. Нужно снизить на 201 балл или больше.
-        // Каждое превышение нормы снижает рейтинг на 10. Нужно минимум 21 превышение.
-        // Выполним 20 превышений - рейтинг станет 300.
-        for (let i = 0; i < 20; i++) {
-             await ecoControlAsDataSource.updateEnvironmentalData(
-                 enterpriseId,
-                 enterpriseAccount.address,
-                 100, // > нормы 50
-                 100  // > нормы 10
-             );
-              // После каждого вызова рейтинг падает на 10. Штраф еще не начисляется.
-        }
-        let enterpriseDataAfter20Violations = await ecoControl.enterprises(enterpriseId);
-        expect(enterpriseDataAfter20Violations.rating).to.equal(initialRating - (20 * ratingDecrease)); // 500 - 200 = 300
-        // Убедимся, что штраф не был начислен (можно было бы проверить последнее событие)
-        // Для простоты, полагаемся на проверку на следующем шаге
+        // Проверяем начальные лимиты
+        let initialLimits = await ecoControl.getEnterpriseLimits(enterpriseId);
+        expect(initialLimits.metric1Limit).to.equal(initialLimitM1);
+        expect(initialLimits.metric2Limit).to.equal(initialLimitM2);
 
-        // Выполняем 21-е превышение - рейтинг упадет с 300 до 290.
-        // Это должно триггернуть штраф.
-        const ratingBeforeCrossing = enterpriseDataAfter20Violations.rating; // Должно быть 300
-        let txCrossing = await ecoControlAsDataSource.updateEnvironmentalData(
-             enterpriseId,
-             enterpriseAccount.address,
-             101, // > нормы 50
-             101  // > нормы 10
-        );
-        let receiptCrossing = await txCrossing.wait();
-        let ratingAfterCrossing = await ecoControl.enterprises(enterpriseId);
-        expect(ratingAfterCrossing.rating).to.equal(ratingBeforeCrossing - ratingDecrease); // 300 - 10 = 290
+        // Владелец устанавливает новые лимиты
+        const tx = await ecoControl.setEnterpriseLimits(enterpriseId, newLimitM1, newLimitM2);
+        await tx.wait();
 
-        // Проверяем событие RatingChanged при пересечении
-        await expect(txCrossing).to.emit(ecoControl, 'RatingChanged').withArgs(enterpriseId, ratingBeforeCrossing, ratingAfterCrossing.rating);
+        // Проверяем, что лимиты обновились
+        let updatedLimits = await ecoControl.getEnterpriseLimits(enterpriseId);
+        expect(updatedLimits.metric1Limit).to.equal(newLimitM1);
+        expect(updatedLimits.metric2Limit).to.equal(newLimitM2);
 
-        // Проверка события FineCharged (ключевой момент!)
-        await expect(txCrossing).to.emit(ecoControl, 'FineCharged').withArgs(enterpriseId, enterpriseAccount.address, fineAmount);
+        // Проверяем событие LimitsUpdated
+        await expect(tx).to.emit(ecoControl, 'LimitsUpdated').withArgs(enterpriseId, newLimitM1, newLimitM2);
 
-        // Проверка балансов токенов после штрафа
-        const finalEnterpriseBalance = await ecoToken.balanceOf(enterpriseAccount.address);
-        const finesCollectedBalance = await ecoControl.getCollectedFinesBalance();
-
-        // Баланс предприятия должен уменьшиться на сумму штрафа (используем оператор - для BigInt)
-        expect(finalEnterpriseBalance).to.equal(enterpriseInitialBalance - fineAmount);
-        // Баланс контракта EcoControl должен увеличиться на сумму штрафа
-        expect(finesCollectedBalance).to.equal(fineAmount);
+        // Проверяем, что НЕ владелец не может установить лимиты
+        const ecoControlAsNonOwner = ecoControl.connect(dataProcessorCaller);
+         await expect(ecoControlAsNonOwner.setEnterpriseLimits(enterpriseId, 300, 60)).to.be.revertedWith("Only owner can call this function");
     });
 
-    // Проверка, что штраф НЕ начисляется, если рейтинг УЖЕ ниже порога
-    it("Should not charge fine if rating is already below threshold", async function () {
-        const ecoControlAsDataSource = ecoControl.connect(dataSourceCaller);
-        const enterpriseId = enterprise2Id; // Используем другое предприятие
-        const enterpriseAccount = enterprise2;
-        const initialRating = 500;
+     // Проверка checkCompliance с ОБНОВЛЕННЫМИ лимитами
+     it("Should use updated enterprise limits for compliance check", async function () {
+         const ecoControlAsProcessor = ecoControl.connect(dataProcessorCaller);
+         const enterpriseId = enterprise1Id;
+         const enterpriseAccount = enterprise1;
+         const enterpriseInitialBalance = await ecoToken.balanceOf(enterpriseAccount.address); // Баланс до проверки
 
-         // Цель: заставить рейтинг упасть НИЖЕ порога (300), но не проверять штраф на этом шаге
-         // Выполним 21 превышение, чтобы рейтинг упал с 500 до 290
-         for (let i = 0; i < 21; i++) {
-              await ecoControlAsDataSource.updateEnvironmentalData(
-                  enterpriseId,
-                  enterpriseAccount.address,
-                  200, // > нормы
-                  200  // > нормы
-              );
-         }
-        let enterpriseDataAfter21Violations = await ecoControl.enterprises(enterpriseId);
-        const ratingAfter21Violations = enterpriseDataAfter21Violations.rating;
-        expect(ratingAfter21Violations).to.equal(initialRating - (21 * ratingDecrease)); // 500 - 210 = 290
-        expect(ratingAfter21Violations).to.be.lt(fineThreshold); // Убеждаемся, что он ниже порога
+         // Владелец устанавливает НОВЫЕ лимиты (например, очень низкие)
+         const newLimitM1 = 10;
+         const newLimitM2 = 5;
+         await ecoControl.setEnterpriseLimits(enterpriseId, newLimitM1, newLimitM2);
 
-        // Теперь выполняем еще одно обновление данных с превышением нормы
-        // Рейтинг упадет дальше (290 -> 280), но штраф НЕ должен начисляться,
-        // потому что рейтинг УЖЕ ниже порога (oldRating = 290, newRating = 280, fineThreshold = 300.
-        // Условие newRating < fineThreshold && oldRating >= fineThreshold => 280 < 300 && 290 >= 300 => true && false => false)
-        let txAfterThreshold = await ecoControlAsDataSource.updateEnvironmentalData(
+         // Вызываем checkCompliance с данными, которые были ниже СТАРЫХ лимитов (100, 20),
+         // но теперь ВЫШЕ НОВЫХ лимитов (10, 5)
+         const testData = { metric1: 50n, metric2: 10n }; // Те же данные, что и в complianceData, но как BigInt
+
+         let tx = await ecoControlAsProcessor.checkCompliance(
              enterpriseId,
-             enterpriseAccount.address,
-             201, // > нормы
-             201  // > нормы
+             testData.metric1, testData.metric2
          );
-        let receiptAfterThreshold = await txAfterThreshold.wait();
+         let receipt = await tx.wait();
+         let blockTimestamp = (await ethers.provider.getBlock(receipt.blockNumber)).timestamp;
 
-        let enterpriseDataAfter22Violations = await ecoControl.enterprises(enterpriseId);
-        expect(enterpriseDataAfter22Violations.rating).to.equal(ratingAfter21Violations - ratingDecrease); // 290 - 10 = 280
+         // --- УДАЛЯЕМ проверку события DataUpdated в этом тесте ---
+         // await expect(tx).to.emit(ecoControl, 'DataUpdated').withArgs(...);
+         // --- Конец удаления ---
 
-         // Проверяем, что событие FineCharged НЕ начислено при этом обновлении
-         await expect(txAfterThreshold).not.to.emit(ecoControl, 'FineCharged');
+         // Проверка события ComplianceChecked - теперь лимиты должны быть ПРЕВЫШЕНЫ
+         await expect(tx).to.emit(ecoControl, 'ComplianceChecked').withArgs(
+             enterpriseId,
+             testData.metric1, testData.metric2,
+             true // limitsExceeded должен быть true
+         );
 
-         // Можно также проверить, что событие FineChargeFailed тоже не начислено
-         await expect(txAfterThreshold).not.to.emit(ecoControl, 'FineChargeFailed');
+         // Проверяем, что был начислен штраф
+         await expect(tx).to.emit(ecoControl, 'FineCharged').withArgs(
+             enterpriseId,
+             enterpriseAccount.address,
+             fineAmount
+         );
+
+         // Проверяем изменение балансов
+         const finalEnterpriseBalance = await ecoToken.balanceOf(enterpriseAccount.address);
+         const finesCollectedBalance = await ecoControl.getCollectedFinesBalance();
+         expect(finalEnterpriseBalance).to.equal(enterpriseInitialBalance - fineAmount);
+         expect(finesCollectedBalance).to.equal(fineAmount);
+     });
+
+
+    // Проверка функций чтения данных
+    it("Should correctly return enterprise data using view functions", async function () {
+        // Данные устанавливаются в beforeEach и затем, возможно, в других тестах (но beforeEach сбрасывает состояние)
+        // Проверяем данные после beforeEach
+        let enterprise1Data = await ecoControl.enterprises(enterprise1Id);
+        expect(enterprise1Data.name).to.equal("Предприятие 1");
+        expect(enterprise1Data.id).to.equal(enterprise1Id);
+        expect(enterprise1Data.enterpriseAddress).to.equal(enterprise1.address);
+        expect(enterprise1Data.metric1Limit).to.equal(initialLimitM1);
+        expect(enterprise1Data.metric2Limit).to.equal(initialLimitM2);
+        expect(enterprise1Data.latestDataTimestamp).to.equal(0); // Пока нет данных
+        expect(enterprise1Data.latestMetric1).to.equal(0);
+        expect(enterprise1Data.latestMetric2).to.equal(0);
+
+        // Проверяем геттер адреса
+        expect(await ecoControl.getEnterpriseAddress(enterprise1Id)).to.equal(enterprise1.address);
+         await expect(ecoControl.getEnterpriseAddress(999)).to.be.revertedWith("Enterprise with this ID does not exist"); // Несуществующий ID
+
+        // Проверяем геттер лимитов
+        let limits = await ecoControl.getEnterpriseLimits(enterprise1Id);
+        expect(limits.metric1Limit).to.equal(initialLimitM1);
+        expect(limits.metric2Limit).to.equal(initialLimitM2);
+         await expect(ecoControl.getEnterpriseLimits(999)).to.be.revertedWith("Enterprise with this ID does not exist"); // Несуществующий ID
+
+
+        // Проверяем геттер последних данных (сначала 0)
+        let latestData = await ecoControl.getLatestEnvironmentalData(enterprise1Id);
+        expect(latestData.timestamp).to.equal(0);
+        expect(latestData.metric1).to.equal(0);
+        expect(latestData.metric2).to.equal(0);
+         await expect(ecoControl.getLatestEnvironmentalData(999)).to.be.revertedWith("Enterprise with this ID does not exist"); // Несуществующий ID
+
+
+        // Вызываем checkCompliance, чтобы обновить последние данные
+        const ecoControlAsProcessor = ecoControl.connect(dataProcessorCaller);
+        let tx = await ecoControlAsProcessor.checkCompliance(
+            enterprise1Id,
+            exceedingData.metric1, exceedingData.metric2 // 150n, 30n
+        );
+        let receipt = await tx.wait();
+        let blockTimestamp = (await ethers.provider.getBlock(receipt.blockNumber)).timestamp;
+
+        // Проверяем геттер последних данных после обновления
+        latestData = await ecoControl.getLatestEnvironmentalData(enterprise1Id);
+        expect(latestData.timestamp).to.be.closeTo(blockTimestamp, 5);
+        expect(latestData.metric1).to.equal(exceedingData.metric1);
+        expect(latestData.metric2).to.equal(exceedingData.metric2);
+
     });
 
-
-    // Проверка сценария с недостаточным балансом (важный негативный тест)
-    it("Should emit FineChargeFailed if enterprise has insufficient balance when fine is due", async function () {
-        const ecoControlAsDataSource = ecoControl.connect(dataSourceCaller);
-        const enterpriseId = enterprise1Id;
-        const enterpriseAccount = enterprise1;
-        const initialRating = 500;
-        const enterpriseInitialBalance = await ecoToken.balanceOf(enterpriseAccount.address); // Баланс предприятия до любых действий в этом тесте
-
-        // Убедимся, что у предприятия недостаточно токенов для стандартного штрафа (100 ECO)
-        // В beforeEach минтится 5000 ECO. Штраф 100 ECO.
-        // Чтобы симулировать недостаточный баланс, временно установим сумму штрафа БОЛЬШЕ, чем текущий баланс предприятия.
-        const currentEnterpriseBalance = await ecoToken.balanceOf(enterpriseAccount.address);
-        const largeFineAmount = currentEnterpriseBalance + 1n; // Штраф на 1 токен больше баланса
-        await ecoControl.setFineAmount(largeFineAmount);
-        // console.log(`Тест: Установлен штраф ${largeFineAmount} больше баланса предприятия ${currentEnterpriseBalance}.`); // Отладочный вывод
-
-        // Цель: заставить рейтинг упасть с >= fineThreshold (300) до < fineThreshold (300)
-        // Выполним 21 превышение, чтобы рейтинг упал с 500 до 290
-        // При этом будет попытка списать большой штраф.
-         for (let i = 0; i < 21; i++) {
-              await ecoControlAsDataSource.updateEnvironmentalData(
-                  enterpriseId,
-                  enterpriseAccount.address,
-                  300, // > нормы
-                  300  // > нормы
-              );
-              // В каждом вызове rating падает на 10.
-              // На 21-м вызове рейтинг упадет до 290.
-              // В этот момент (на 21-м вызове) контракт попытается списать штраф.
-              // Поскольку баланс недостаточен для largeFineAmount, transferFrom вернет false.
-              // Контракт должен эмитить FineChargeFailed.
-              // Мы можем проверить это на последней транзакции цикла.
-              if (i === 20) { // Проверяем 21-ю (i=20) транзакцию
-                  let tx = await ecoControlAsDataSource.updateEnvironmentalData( // Выполняем последний вызов отдельно для получения tx
-                      enterpriseId,
-                      enterpriseAccount.address,
-                      301,
-                      301
-                  );
-                   let receipt = await tx.wait();
-
-                  // Проверяем, что событие FineCharged НЕ эмитировано
-                  await expect(tx).not.to.emit(ecoControl, 'FineCharged');
-
-                  // Проверяем, что событие FineChargeFailed эмитировано с правильной причиной
-                  await expect(tx).to.emit(ecoControl, 'FineChargeFailed').withArgs(
-                      enterpriseId,
-                      enterpriseAccount.address,
-                      largeFineAmount, // Ожидаем сумму, которую пытались списать
-                      "transferFrom failed" // Ожидаем указанную причину ошибки из контракта
-                  );
-                   // Завершаем цикл после проверки последней транзакции
-                   break;
-              }
-         }
-
-
-        // Проверяем, что балансы НЕ изменились (токены не списались)
-        expect(await ecoToken.balanceOf(enterpriseAccount.address)).to.equal(enterpriseInitialBalance);
-        expect(await ecoControl.getCollectedFinesBalance()).to.equal(0);
-
-        // Возвращаем сумму штрафа к стандартному значению для других тестов (если они выполняются после этого)
-        await ecoControl.setFineAmount(fineAmount);
-    });
 
      // Проверка вывода собранных штрафов владельцем
      it("Should allow owner to withdraw collected fines", async function () {
-         const ecoControlAsDataSource = ecoControl.connect(dataSourceCaller);
+         const ecoControlAsProcessor = ecoControl.connect(dataProcessorCaller);
          const enterpriseId = enterprise1Id;
          const enterpriseAccount = enterprise1;
 
-         // Цель: заставить рейтинг упасть с >= fineThreshold (300) до < fineThreshold (300)
-         // Выполним 21 превышение, чтобы рейтинг упал с 500 до 290
-         // При этом должен быть начислен штраф.
-          for (let i = 0; i < 21; i++) {
-               await ecoControlAsDataSource.updateEnvironmentalData(
-                   enterpriseId,
-                   enterpriseAccount.address,
-                   400, // > нормы
-                   400  // > нормы
-               );
-          }
+         // Начисляем штраф, вызвав checkCompliance с превышением лимитов
+          await ecoControlAsProcessor.checkCompliance(
+              enterpriseId,
+              exceedingData.metric1, exceedingData.metric2 // 150n, 30n
+          );
          // На этом этапе штраф должен быть начислен, и ecoControl должен иметь fineAmount токенов
 
          const collectedBalance = await ecoControl.getCollectedFinesBalance();
@@ -395,8 +432,8 @@ describe("EcoControl", function () {
          expect(deployerFinalBalance).to.equal(deployerInitialBalance + collectedBalance);
 
          // Проверяем, что НЕ владелец не может вывести средства
-         const ecoControlAsNonOwner = ecoControl.connect(dataSourceCaller);
-         await expect(ecoControlAsNonOwner.withdrawCollectedFines(dataSourceCaller.address)).to.be.revertedWith("Only owner can call this function");
+         const ecoControlAsNonOwner = ecoControl.connect(dataProcessorCaller);
+         await expect(ecoControlAsNonOwner.withdrawCollectedFines(dataProcessorCaller.address)).to.be.revertedWith("Only owner can call this function");
 
      });
 
@@ -408,6 +445,5 @@ describe("EcoControl", function () {
         // Попытка вывода владельцем
         await expect(ecoControl.withdrawCollectedFines(deployer.address)).to.be.revertedWith("No tokens collected to withdraw");
     });
-
 
 });

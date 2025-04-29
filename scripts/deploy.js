@@ -1,56 +1,69 @@
 // Импортируем ethers из hardhat
 const { ethers } = require("hardhat");
 
-// Импортируем константу максимального uint256 для бесконечного аппрува
-const MAX_UINT256 = ethers.MaxUint256; // Правильное свойство в ethers v6+
+// Импортируем константу максимального uint256 для бесконечного аппрува (для BigInt в ethers v6+)
+const MAX_UINT256 = ethers.MaxUint256;
 
 async function main() {
   // Получаем тестовые аккаунты из Hardhat Network
-  // Первый аккаунт обычно используется как deployer (владелец)
-  // Остальные можно использовать дляDataSourceCaller и предприятий
-  const [deployer, dataSourceCallerAccount, enterprise1Account, enterprise2Account, ...otherAccounts] = await ethers.getSigners();
+  // deployer - владелец контрактов
+  // dataProcessorCallerAccount - аккаунт, который будет вызывать checkCompliance
+  // enterprise1, enterprise2 - аккаунты предприятий
+  const [deployer, dataProcessorCallerAccount, enterprise1, enterprise2, ...otherAccounts] = await ethers.getSigners();
 
   console.log("Развертывание контрактов с аккаунта:", deployer.address);
-  console.log("Баланс аккаунта развертывания:", ethers.formatEther(await ethers.provider.getBalance(deployer.address))); // ethers v6+
+  // Используем formatEther для BigInt в ethers v6+
+  console.log("Баланс аккаунта развертывания:", ethers.formatEther(await ethers.provider.getBalance(deployer.address)));
 
   // --- Развертывание EcoToken ---
   console.log("\nРазвертывание EcoToken...");
   const EcoToken = await ethers.getContractFactory("EcoToken");
-  // При развертывании EcoToken, передаем начальное количество токенов для минтинга
-  // Например, 1,000,000 токенов с 18 десятичными знаками
-  const initialTokenSupply = ethers.parseUnits("1000000", 18); // ethers v6+
+  // Начальное количество токенов для минтинга владельцу (deployer)
+  const initialTokenSupply = ethers.parseUnits("1000000", 18); // 1,000,000 токенов ECO
   const ecoToken = await EcoToken.deploy(initialTokenSupply);
-  await ecoToken.waitForDeployment(); // Ожидаем завершения развертывания
+  await ecoToken.waitForDeployment();
 
-  const ecoTokenAddress = await ecoToken.getAddress(); // Получаем адрес развернутого контракта
-  console.log("EcoToken развернут по адресу:", ecoTokenAddress);
+  const ecoTokenAddress = await ecoToken.getAddress();
+  console.log(`EcoToken развернут по адресу: ${ecoTokenAddress}`);
 
   // --- Развертывание EcoControl ---
   console.log("\nРазвертывание EcoControl...");
   const EcoControl = await ethers.getContractFactory("EcoControl");
-  // EcoControl не требует аргументов в конструкторе
+  // EcoControl теперь не требует аргументов в конструкторе
   const ecoControl = await EcoControl.deploy();
-  await ecoControl.waitForDeployment(); // Ожидаем завершения развертывания
+  await ecoControl.waitForDeployment();
 
-  const ecoControlAddress = await ecoControl.getAddress(); // Получаем адрес развернутого контракта
-  console.log("EcoControl развернут по адресу:", ecoControlAddress);
+  const ecoControlAddress = await ecoControl.getAddress();
+  console.log(`EcoControl развернут по адресу: ${ecoControlAddress}`);
 
   // --- Настройка EcoControl ---
   console.log("\nНастройка EcoControl...");
-  // Устанавливаем адрес контракта EcoToken в EcoControl
+  // Устанавливаем адрес контракта EcoToken
   await ecoControl.setEcoTokenAddress(ecoTokenAddress);
   console.log(`Адрес EcoToken (${ecoTokenAddress}) установлен в EcoControl.`);
 
-  // Устанавливаем аккаунт источника данных в EcoControl
-  await ecoControl.setDataSourceCaller(dataSourceCallerAccount.address);
-  console.log(`Аккаунт источника данных установлен в EcoControl: ${dataSourceCallerAccount.address}`);
+  // Устанавливаем аккаунт обработчика данных (ранее data source caller)
+  await ecoControl.setDataProcessorCaller(dataProcessorCallerAccount.address); // Исправлено имя функции и переменной
+  console.log(`Аккаунт обработчика данных установлен в EcoControl: ${dataProcessorCallerAccount.address}`);
 
-  // --- Настройка тестовых предприятий ---
-  console.log("\nНастройка тестовых предприятий...");
-  const enterpriseAccounts = [enterprise1Account, enterprise2Account]; // Используем аккаунты 3 и 4
+  // Удаляем установку fineThreshold, т.к. его больше нет
+  // await ecoControl.setFineThreshold(fineThreshold);
 
+  // Устанавливаем сумму штрафа (необязательно, если используется значение по умолчанию в контракте, но явно лучше)
+  // const fineAmountValue = ethers.parseUnits("100", 18); // 100 ECO
+  // await ecoControl.setFineAmount(fineAmountValue);
+  // console.log(`Сумма штрафа установлена в EcoControl: ${ethers.formatEther(fineAmountValue)} ECO`);
+
+
+  // --- Регистрация и настройка тестовых предприятий ---
+  console.log("\nРегистрация и настройка тестовых предприятий...");
+  // Массив аккаунтов предприятий
+  const enterpriseAccounts = [enterprise1, enterprise2];
+  // Начальные лимиты для регистрируемых предприятий (пример)
+  const initialMetric1Limit = 100; // Например, лимит PM2.5 в мкг/м³
+  const initialMetric2Limit = 20;  // Например, лимит SO2 в ppm
   // Количество токенов для минтинга каждому предприятию
-  const tokensPerEnterprise = ethers.parseUnits("1000", 18); // Например, 1000 ECO
+  const tokensPerEnterprise = ethers.parseUnits("5000", 18); // Например, 5000 ECO
 
   for (let i = 0; i < enterpriseAccounts.length; i++) {
     const enterprise = enterpriseAccounts[i];
@@ -58,14 +71,22 @@ async function main() {
 
     console.log(`\nНастройка ${enterpriseName} (${enterprise.address})...`);
 
-    // 1. Регистрация предприятия в EcoControl (вызывается владельцем EcoControl)
-    await ecoControl.registerEnterprise(enterpriseName, enterprise.address);
+    // 1. Регистрация предприятия в EcoControl
+    // Теперь registerEnterprise требует адрес и начальные лимиты
+    await ecoControl.registerEnterprise(
+        enterpriseName,
+        enterprise.address, // Адрес предприятия
+        initialMetric1Limit, // Начальный лимит Метрики 1
+        initialMetric2Limit  // Начальный лимит Метрики 2
+    );
     console.log(`- ${enterpriseName} зарегистрировано в EcoControl.`);
+    console.log(`  Начальные лимиты: M1=${initialMetric1Limit}, M2=${initialMetric2Limit}`);
+
 
     // 2. Минтинг токенов ECO для предприятия (вызывается владельцем EcoToken)
-    // Владелец EcoToken - это аккаунт deployer
+    // Владелец EcoToken - это аккаунт deployer (который запустил этот скрипт)
     await ecoToken.mint(enterprise.address, tokensPerEnterprise);
-    console.log(`- ${tokensPerEnterprise.toString()} токенов ECO сминтировано для ${enterpriseName}.`);
+    console.log(`- ${ethers.formatEther(tokensPerEnterprise)} токенов ECO сминтировано для ${enterpriseName}.`);
 
     // Проверяем баланс предприятия (опционально)
     // const enterpriseEcoBalance = await ecoToken.balanceOf(enterprise.address);
@@ -73,10 +94,7 @@ async function main() {
 
     // 3. Выполнение АППРУВА предприятием на контракте EcoToken
     // Предприятие разрешает контракту EcoControl тратить его токены (бесконечное разрешение)
-    // Для этого нужно выполнить вызов функции approve от имени аккаунта предприятия
-    // Создаем экземпляр контракта EcoToken, подключенный к аккаунту предприятия
     const ecoTokenWithEnterprise = ecoToken.connect(enterprise);
-    // Вызываем approve: контракту EcoControl разрешено тратить с аккаунта enterprise
     await ecoTokenWithEnterprise.approve(ecoControlAddress, MAX_UINT256); // Бесконечный аппрув
     console.log(`- ${enterpriseName} дал бесконечное разрешение EcoControl тратить токены ECO.`);
 
@@ -89,7 +107,7 @@ async function main() {
   console.log("Адрес EcoControl для взаимодействия:", ecoControlAddress);
   console.log("Адрес EcoToken для взаимодействия:", ecoTokenAddress);
   console.log("Аккаунт владельца:", deployer.address);
-  console.log("Аккаунт источника данных:", dataSourceCallerAccount.address);
+  console.log("Аккаунт обработчика данных:", dataProcessorCallerAccount.address); // Исправлено имя
   enterpriseAccounts.forEach((acc, index) => {
       console.log(`Аккаунт Предприятия ${index + 1}:`, acc.address);
   });
