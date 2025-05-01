@@ -27,13 +27,13 @@ const enterprisesConfig = [
     {
         enterpriseId: 0, // ID первого предприятия (Предприятие 1 из скрипта deploy)
         enterpriseAddress: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", // Адрес enterprise1 (убедись, что совпадает с твоим выводом npx hardhat node)
-        waqiStationUid: 73168, // Твой UID станции 1
+        waqiStationUid: 12899, // Твой UID станции 1
         metricsToCollect: ["pm25", "pm10"] // Твои метрики
     },
     {
         enterpriseId: 1, // ID второго предприятия (Предприятие 2)
         enterpriseAddress: "0x90F79bf6EB2c4f870365E785982E1f101E93b906", // Адрес enterprise2 (убедись, что совпадает с твоим выводом npx hardhat node)
-        waqiStationUid: 30255, // Твой UID станции 2
+        waqiStationUid:  12725, // Твой UID станции 2
         metricsToCollect: ["pm25", "pm10"] // Твои метрики
     }
     // Если нужно добавить больше предприятий, зарегистрированных в deploy.js, добавь их сюда
@@ -152,7 +152,6 @@ console.log("DEBUG: process.env.WAQI_API_TOKEN:", process.env.WAQI_API_TOKEN);
         try {
             const tx = await ecoControlContract.checkCompliance(
                 enterpriseConfig.enterpriseId,       // ID предприятия
-                enterpriseConfig.enterpriseAddress,  // Адрес предприятия (нужен для transferFrom)
                 metric1Value,                      // Значение Метрики 1 (уже округлено)
                 metric2Value                       // Значение Метрики 2 (уже округлено)
             );
