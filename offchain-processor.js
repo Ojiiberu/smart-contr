@@ -21,33 +21,206 @@ if (!waqiApiToken || waqiApiToken === 'YOUR_WAQI_TOKEN') { // Оставляем
     process.exit(1);
 }
 
-// Конфигурация предприятий и соответствующих станций мониторинга
-// ID предприятия (в контракте) <-> UID станции WAQI <-> Какие метрики собираем
-const enterprisesConfig = [
+// Парсинг аргументов командной строки для определения городов
+// Если указаны аргументы командной строки, они перезаписывают города в конфиге
+const args = process.argv.slice(2);
+let customCities = [];
+
+if (args.length > 0) {
+    console.log("Обнаружены пользовательские аргументы для городов:");
+    args.forEach(city => {
+        console.log(`  - ${city}`);
+        customCities.push(city);
+    });
+}
+
+// Конфигурация предприятий по умолчанию
+// Теперь вместо UID станции используем объект для гибкой настройки:
+// - либо указываем city напрямую (город, в котором находится предприятие)
+// - либо указываем stations для автопоиска ближайших станций к предприятию
+const defaultConfig = [
     {
         enterpriseId: 0, // ID первого предприятия (Предприятие 1 из скрипта deploy)
-        enterpriseAddress: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", // Адрес enterprise1 (убедись, что совпадает с твоим выводом npx hardhat node)
-        waqiStationUid: 12899, // Твой UID станции 1
-        metricsToCollect: ["pm25", "pm10"] // Твои метрики
+        enterpriseAddress: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", 
+        city: "London", // Город для первого предприятия
+        metricsToCollect: ["pm25", "pm10"] // Метрики для сбора
     },
     {
         enterpriseId: 1, // ID второго предприятия (Предприятие 2)
-        enterpriseAddress: "0x90F79bf6EB2c4f870365E785982E1f101E93b906", // Адрес enterprise2 (убедись, что совпадает с твоим выводом npx hardhat node)
-        waqiStationUid:  12725, // Твой UID станции 2
-        metricsToCollect: ["pm25", "pm10"] // Твои метрики
+        enterpriseAddress: "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        city: "New York", // Город для второго предприятия
+        metricsToCollect: ["pm25", "pm10"] // Метрики для сбора
     }
-    // Если нужно добавить больше предприятий, зарегистрированных в deploy.js, добавь их сюда
+    // Можно добавить больше предприятий при необходимости
 ];
 
-// Убедимся, что в контракте EcoControl Metric 1 соответствует PM25, а Metric 2 соответствует PM10
-// Сейчас в EcoControl Metric 1Threshold=50, Metric 2Threshold=10 по умолчанию.
-// Ты можешь установить их через функцию setEnterpriseLimits после регистрации в скрипте deploy.js
-// или вручную вызвать setEnterpriseLimits для каждого предприятия через hardhat console или фронтенд.
-// Для этого скрипта просто важно, какие API метрики мы берем.
+// Если указаны пользовательские города, обновляем конфигурацию
+const enterprisesConfig = customCities.length > 0
+    ? customCities.map((city, index) => ({
+        enterpriseId: index,
+        enterpriseAddress: defaultConfig[index % defaultConfig.length].enterpriseAddress,
+        city: city,
+        metricsToCollect: ["pm25", "pm10"]
+    }))
+    : defaultConfig;
+
+if (customCities.length > 0) {
+    console.log("Используем следующую конфигурацию предприятий:");
+    console.log(JSON.stringify(enterprisesConfig, null, 2));
+}
+
+/**
+ * Получает данные о качестве воздуха для указанного города
+ * @param {string} city - Название города
+ * @param {string} token - API токен WAQI
+ * @returns {Promise<Object>} - Объект с данными о качестве воздуха
+ */
+async function getAirQualityByCity(city, token) {
+    console.log(`   Запрос данных о качестве воздуха для города: ${city}`);
+    
+    // Используем city endpoint напрямую
+    const apiUrl = `https://api.waqi.info/feed/${encodeURIComponent(city)}/?token=${token}`;
+    console.log(`   API URL: ${apiUrl}`);
+    
+    try {
+        const response = await fetch(apiUrl);
+        
+        if (!response.ok) {
+            throw new Error(`Ошибка HTTP: ${response.status} - ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.status === 'ok') {
+            console.log(`   Успешно получены данные о качестве воздуха для города: ${city}`);
+            return data.data;
+        } else {
+            console.error(`   Ошибка API: ${data.status}`);
+            if (data.data) console.error(`   Сообщение: ${data.data}`);
+            return null;
+        }
+    } catch (error) {
+        console.error(`   Ошибка при получении данных о качестве воздуха: ${error.message}`);
+        return null;
+    }
+}
+
+/**
+ * Поиск станций мониторинга по ключевому слову (городу)
+ * @param {string} keyword - Ключевое слово для поиска (город, регион и т.д.)
+ * @param {string} token - API токен WAQI
+ * @returns {Promise<Array>} - Массив найденных станций
+ */
+async function searchStations(keyword, token) {
+    console.log(`   Поиск станций мониторинга по ключевому слову: ${keyword}`);
+    
+    const searchUrl = `https://api.waqi.info/search/?keyword=${encodeURIComponent(keyword)}&token=${token}`;
+    console.log(`   Search API URL: ${searchUrl}`);
+    
+    try {
+        const response = await fetch(searchUrl);
+        
+        if (!response.ok) {
+            throw new Error(`Ошибка HTTP: ${response.status} - ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.status === 'ok') {
+            console.log(`   Найдено ${data.data.length} станций для "${keyword}"`);
+            return data.data;
+        } else {
+            console.error(`   Ошибка API при поиске: ${data.status}`);
+            if (data.data) console.error(`   Сообщение: ${data.data}`);
+            return [];
+        }
+    } catch (error) {
+        console.error(`   Ошибка при поиске станций: ${error.message}`);
+        return [];
+    }
+}
+
+/**
+ * Получает данные о качестве воздуха по UID станции
+ * @param {number} uid - UID станции мониторинга
+ * @param {string} token - API токен WAQI
+ * @returns {Promise<Object>} - Объект с данными о качестве воздуха
+ */
+async function getAirQualityByStationUID(uid, token) {
+    console.log(`   Запрос данных о качестве воздуха для станции UID: ${uid}`);
+    
+    const apiUrl = `https://api.waqi.info/feed/@${uid}/?token=${token}`;
+    console.log(`   API URL: ${apiUrl}`);
+    
+    try {
+        const response = await fetch(apiUrl);
+        
+        if (!response.ok) {
+            throw new Error(`Ошибка HTTP: ${response.status} - ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.status === 'ok') {
+            console.log(`   Успешно получены данные о качестве воздуха для станции UID: ${uid}`);
+            return data.data;
+        } else {
+            console.error(`   Ошибка API: ${data.status}`);
+            if (data.data) console.error(`   Сообщение: ${data.data}`);
+            return null;
+        }
+    } catch (error) {
+        console.error(`   Ошибка при получении данных о качестве воздуха: ${error.message}`);
+        return null;
+    }
+}
+
+/**
+ * Извлекает значения метрик из данных о качестве воздуха
+ * @param {Object} airData - Данные о качестве воздуха
+ * @param {Array<string>} metrics - Массив названий метрик для извлечения
+ * @returns {Object} - Объект с извлеченными значениями метрик
+ */
+function extractMetricsValues(airData, metrics) {
+    const result = {};
+    
+    if (!airData || !airData.iaqi) {
+        console.error("   Данные о качестве воздуха отсутствуют или не содержат информацию о метриках");
+        return null;
+    }
+    
+    const iaqi = airData.iaqi;
+    
+    for (const metric of metrics) {
+        if (iaqi[metric] && typeof iaqi[metric].v !== 'undefined') {
+            // Округляем до целого числа и проверяем, что значение не отрицательное
+            result[metric] = Math.max(0, Math.round(iaqi[metric].v));
+        } else {
+            console.warn(`   Метрика "${metric}" отсутствует в данных`);
+            result[metric] = 0; // Значение по умолчанию
+        }
+    }
+    
+    return result;
+}
+
+/**
+ * Сохраняет результаты измерений в JSON-файл
+ * @param {Object} results - Объект с результатами измерений
+ * @param {string} filename - Имя файла для сохранения
+ */
+function saveResultsToFile(results, filename = 'air-quality-results.json') {
+    try {
+        fs.writeFileSync(filename, JSON.stringify(results, null, 2));
+        console.log(`Результаты сохранены в файл: ${filename}`);
+    } catch (error) {
+        console.error(`Ошибка при сохранении результатов в файл: ${error.message}`);
+    }
+}
 
 async function processEnvironmentalData() {
     console.log("DEBUG: process.env.DATA_PROCESSOR_PRIVATE_KEY:", process.env.DATA_PROCESSOR_PRIVATE_KEY);
-console.log("DEBUG: process.env.WAQI_API_TOKEN:", process.env.WAQI_API_TOKEN);
+    console.log("DEBUG: process.env.WAQI_API_TOKEN:", process.env.WAQI_API_TOKEN);
     console.log("Запуск оффчейн процессора...");
 
     // 1. Подключение к блокчейну
@@ -79,81 +252,99 @@ console.log("DEBUG: process.env.WAQI_API_TOKEN:", process.env.WAQI_API_TOKEN);
     const ecoControlContract = new ethers.Contract(addresses.ecoControl, EcoControlArtifact.abi, wallet);
     console.log(`Получен экземпляр контракта EcoControl по адресу ${ecoControlContract.address}`);
 
-    // --- Процесс для каждого предприятия ---
-    for (const enterpriseConfig of enterprisesConfig) {
-        console.log(`\nОбработка для Предприятия ID ${enterpriseConfig.enterpriseId} (Станция WAQI UID ${enterpriseConfig.waqiStationUid})...`);
+    // Объект для хранения результатов
+    const results = {};
 
-        // 4. Получение данных о загрязнении из API WAQI (РЕАЛЬНЫЙ ВЫЗОВ)
-        let metric1Value = 0; // Используем 0 как значение по умолчанию/при ошибке
+    // --- Процесс для каждого предприятия ---
+    for (const enterprise of enterprisesConfig) {
+        console.log(`\nОбработка для Предприятия ID ${enterprise.enterpriseId} (Город: ${enterprise.city})...`);
+        
+        // Переменные для хранения значений метрик
+        let metric1Value = 0;
         let metric2Value = 0;
         let dataFetchedSuccessfully = false;
-
-        const waqiApiUrl = `https://api.waqi.info/feed/@${enterpriseConfig.waqiStationUid}/?token=${waqiApiToken}`;
-        console.log(`   Запрос данных из API: ${waqiApiUrl}`);
-
+        let airQualityData = null;
+        
         try {
-            const apiResponse = await fetch(waqiApiUrl);
-
-            if (!apiResponse.ok) {
-                // Если ответ не 2xx, бросаем ошибку
-                throw new Error(`Ошибка HTTP: ${apiResponse.status} - ${apiResponse.statusText}`);
+            // Получаем данные о качестве воздуха
+            
+            // Сначала пробуем получить данные по городу (это проще и быстрее)
+            if (enterprise.city) {
+                airQualityData = await getAirQualityByCity(enterprise.city, waqiApiToken);
             }
-
-            const result = await apiResponse.json();
-
-            if (result.status === "ok" && result.data && result.data.iaqi) {
-                const iaqiData = result.data.iaqi;
-
-                // Извлекаем нужные метрики по их названиям
-                const metric1Param = enterpriseConfig.metricsToCollect[0];
-                const metric2Param = enterpriseConfig.metricsToCollect[1];
-
-                const m1Data = iaqiData[metric1Param];
-                const m2Data = iaqiData[metric2Param];
-
-                if (m1Data && m2Data && typeof m1Data.v !== 'undefined' && typeof m2Data.v !== 'undefined') {
-                    // Получаем значения
-                    const rawMetric1 = m1Data.v;
-                    const rawMetric2 = m2Data.v;
-
-                    // Округляем до ближайшего целого для uint256
-                    metric1Value = Math.round(rawMetric1);
-                    metric2Value = Math.round(rawMetric2);
-
-                    // Проверяем, что округленные значения не отрицательны
-                    if (metric1Value < 0) metric1Value = 0;
-                    if (metric2Value < 0) metric2Value = 0;
-
-
-                    dataFetchedSuccessfully = true;
-                    console.log(`   Получены данные из API: ${metric1Param}=${rawMetric1} (${metric1Value} округлено), ${metric2Param}=${rawMetric2} (${metric2Value} округлено).`);
-                } else {
-                    console.warn(`   В ответе API для станции ${enterpriseConfig.waqiStationUid} не найдены ожидаемые метрики (${metric1Param}, ${metric2Param}).`);
+            
+            // Если не удалось получить данные по городу и у нас есть waqiStationUid
+            if (!airQualityData && enterprise.waqiStationUid) {
+                console.log(`   Не удалось получить данные по городу, пробуем получить по UID станции: ${enterprise.waqiStationUid}`);
+                airQualityData = await getAirQualityByStationUID(enterprise.waqiStationUid, waqiApiToken);
+            }
+            
+            // Если ни один из предыдущих методов не сработал, пробуем найти станции и использовать первую
+            if (!airQualityData && enterprise.city) {
+                console.log(`   Попытка автоматического поиска станций для города: ${enterprise.city}`);
+                const stations = await searchStations(enterprise.city, waqiApiToken);
+                
+                if (stations.length > 0) {
+                    // Используем первую найденную станцию
+                    const firstStation = stations[0];
+                    console.log(`   Найдена станция: ${firstStation.station.name} (UID: ${firstStation.uid})`);
+                    
+                    // Сохраняем UID для будущих запусков (опционально)
+                    enterprise.waqiStationUid = firstStation.uid;
+                    
+                    // Получаем данные по найденной станции
+                    airQualityData = await getAirQualityByStationUID(firstStation.uid, waqiApiToken);
                 }
-            } else {
-                 console.warn(`   API вернуло статус "${result.status}" или не содержит данных для станции ${enterpriseConfig.waqiStationUid}.`);
-                 if (result.data) console.warn(`   API сообщение: ${result.data}`);
             }
-
+            
+            // Проверяем, удалось ли получить данные
+            if (airQualityData) {
+                // Сохраняем результаты для текущего города
+                results[enterprise.city] = {
+                    stationName: airQualityData.city ? airQualityData.city.name : 'Неизвестно',
+                    time: airQualityData.time ? airQualityData.time.s : 'Неизвестно',
+                    aqi: airQualityData.aqi,
+                    pm25: airQualityData.iaqi.pm25 ? Math.round(airQualityData.iaqi.pm25.v) : 'Н/Д',
+                    pm10: airQualityData.iaqi.pm10 ? Math.round(airQualityData.iaqi.pm10.v) : 'Н/Д'
+                };
+                
+                if (customCities.length > 0) {
+                    console.log(`   Результаты для ${enterprise.city}:`);
+                    console.log(`     Станция: ${results[enterprise.city].stationName}`);
+                    console.log(`     AQI: ${results[enterprise.city].aqi}`);
+                    console.log(`     PM2.5: ${results[enterprise.city].pm25}`);
+                    console.log(`     PM10: ${results[enterprise.city].pm10}`);
+                }
+                
+                // Извлекаем значения метрик
+                const metricsValues = extractMetricsValues(airQualityData, enterprise.metricsToCollect);
+                
+                if (metricsValues) {
+                    metric1Value = metricsValues[enterprise.metricsToCollect[0]];
+                    metric2Value = metricsValues[enterprise.metricsToCollect[1]];
+                    
+                    dataFetchedSuccessfully = true;
+                    console.log(`   Получены данные о качестве воздуха: ${enterprise.metricsToCollect[0]}=${metric1Value}, ${enterprise.metricsToCollect[1]}=${metric2Value}`);
+                }
+            }
         } catch (error) {
-            console.error(`   Ошибка при получении данных из API WAQI: ${error.message}`);
+            console.error(`   Ошибка при получении данных о качестве воздуха: ${error.message}`);
+            results[enterprise.city] = { error: error.message };
         }
-
+        
         if (!dataFetchedSuccessfully) {
-            console.error(`   Не удалось получить корректные данные из API для Предприятия ID ${enterpriseConfig.enterpriseId}. Пропускаем.`);
-            // В реальном приложении здесь можно добавить логику уведомлений или пропустить это предприятие
-            continue; // Переходим к следующему предприятию в цикле
+            console.error(`   Не удалось получить данные о качестве воздуха для Предприятия ID ${enterprise.enterpriseId}. Пропускаем.`);
+            continue;
         }
-
 
         // 5. Вызов функции checkCompliance в смарт-контракте
-        console.log(`   Вызов checkCompliance для предприятия ID ${enterpriseConfig.enterpriseId} (${enterpriseConfig.enterpriseAddress}) с данными M1=${metric1Value}, M2=${metric2Value}...`);
+        console.log(`   Вызов checkCompliance для предприятия ID ${enterprise.enterpriseId} (${enterprise.enterpriseAddress}) с данными M1=${metric1Value}, M2=${metric2Value}...`);
 
         try {
             const tx = await ecoControlContract.checkCompliance(
-                enterpriseConfig.enterpriseId,       // ID предприятия
-                metric1Value,                      // Значение Метрики 1 (уже округлено)
-                metric2Value                       // Значение Метрики 2 (уже округлено)
+                enterprise.enterpriseId,       // ID предприятия
+                metric1Value,                  // Значение Метрики 1 (уже округлено)
+                metric2Value                   // Значение Метрики 2 (уже округлено)
             );
 
             console.log(`   Транзакция отправлена: ${tx.hash}`);
@@ -161,34 +352,52 @@ console.log("DEBUG: process.env.WAQI_API_TOKEN:", process.env.WAQI_API_TOKEN);
             console.log(`   Транзакция подтверждена в блоке: ${receipt.blockNumber}`);
 
             // Опционально: Проверка событий в receipt (для отладки)
-             const complianceEvent = receipt.logs.find(log => log.fragment && log.fragment.name === 'ComplianceChecked');
-             if (complianceEvent) {
-                  console.log("   Событие ComplianceChecked:", complianceEvent.args);
-             }
-             const fineChargedEvent = receipt.logs.find(log => log.fragment && log.fragment.name === 'FineCharged');
-             if (fineChargedEvent) {
-                  console.log("   Событие FineCharged:", fineChargedEvent.args);
-             } else {
-                  const fineFailedEvent = receipt.logs.find(log => log.fragment && log.fragment.name === 'FineChargeFailed');
-                  if (fineFailedEvent) {
-                      console.log("   Событие FineChargeFailed:", fineFailedEvent.args);
-                  }
-             }
+            const complianceEvent = receipt.logs.find(log => log.fragment && log.fragment.name === 'ComplianceChecked');
+            if (complianceEvent) {
+                console.log("   Событие ComplianceChecked:", complianceEvent.args);
+                // Добавляем информацию о соответствии в результаты
+                results[enterprise.city].compliant = !complianceEvent.args[3]; // Инвертируем limitsExceeded
+            }
+            const fineChargedEvent = receipt.logs.find(log => log.fragment && log.fragment.name === 'FineCharged');
+            if (fineChargedEvent) {
+                console.log("   Событие FineCharged:", fineChargedEvent.args);
+                // Добавляем информацию о штрафе в результаты
+                results[enterprise.city].fined = true;
+                results[enterprise.city].fineAmount = fineChargedEvent.args[2].toString();
+            } else {
+                const fineFailedEvent = receipt.logs.find(log => log.fragment && log.fragment.name === 'FineChargeFailed');
+                if (fineFailedEvent) {
+                    console.log("   Событие FineChargeFailed:", fineFailedEvent.args);
+                    // Добавляем информацию о неудачной попытке штрафа в результаты
+                    results[enterprise.city].fined = false;
+                    results[enterprise.city].fineFailedReason = fineFailedEvent.args[3];
+                }
+            }
 
-
-            console.log(`   Обработка для Предприятия ID ${enterpriseConfig.enterpriseId} завершена.`);
+            console.log(`   Обработка для Предприятия ID ${enterprise.enterpriseId} завершена.`);
 
         } catch (error) {
-            console.error(`\n   Ошибка при вызове контракта checkCompliance для ID ${enterpriseConfig.enterpriseId}: ${error.message}`);
-            // При ошибке вызова контракта (например, revert из require), здесь будет подробное сообщение
-            // В реальном приложении нужно логировать или уведомлять
+            console.error(`\n   Ошибка при вызове контракта checkCompliance для ID ${enterprise.enterpriseId}: ${error.message}`);
+            results[enterprise.city].contractError = error.message;
         }
     } // Конец цикла по предприятиям
 
+    // Сохраняем результаты в файл
+    if (Object.keys(results).length > 0) {
+        saveResultsToFile(results);
+    }
 
     console.log("\nОффчейн процессор завершил работу!");
-
+    return results;
 }
 
 // Запуск основной функции
-processEnvironmentalData();
+processEnvironmentalData()
+    .then(results => {
+        console.log("Обработка завершена успешно.");
+        process.exit(0);
+    })
+    .catch(error => {
+        console.error("Произошла ошибка:", error);
+        process.exit(1);
+    });

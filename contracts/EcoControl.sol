@@ -170,6 +170,23 @@ contract EcoControl {
         console.log(_metric2Limit);
     }
 
+    // --- Новая функция для обновления лимитов для всех предприятий сразу ---
+    function updateAllEnterprisesLimits(uint256 _newMetric1Limit, uint256 _newMetric2Limit) public onlyOwner {
+        require(nextEnterpriseId > 0, "No enterprises registered yet");
+        
+        for (uint256 i = 0; i < nextEnterpriseId; i++) {
+            enterprises[i].metric1Limit = _newMetric1Limit;
+            enterprises[i].metric2Limit = _newMetric2Limit;
+            
+            emit LimitsUpdated(i, _newMetric1Limit, _newMetric2Limit);
+        }
+        
+        console.log("Updated limits for all enterprises:");
+        console.log("New M1 Limit:");
+        console.log(_newMetric1Limit);
+        console.log("New M2 Limit:");
+        console.log(_newMetric2Limit);
+    }
 
     // --- Функция для приема данных, проверки и начисления штрафа ---
     // Переименовали и переработали updateEnvironmentalData в checkCompliance

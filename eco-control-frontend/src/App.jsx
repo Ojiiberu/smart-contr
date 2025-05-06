@@ -3,7 +3,9 @@ import './App.css';
 import { 
   connectWallet, 
   getContracts, 
-  getWaqiData,
+  getWaqiDataByCity,
+  getWaqiDataByStationUID,
+  searchWaqiStations,
   enterprisesConfig,
   disconnectWallet
 } from './ethers-utils';
@@ -101,7 +103,8 @@ function App() {
             latestMetric1: enterprise[4].toString(),
             latestMetric2: enterprise[5].toString(),
             latestDataTimestamp: enterprise[6].toString(),
-            waqiStationUid: config.waqiStationUid,
+            city: config.city,
+            waqiStationUid: config.waqiStationUid, // Может быть undefined
             metricsToCollect: config.metricsToCollect // Добавляем информацию о метриках
           });
         } catch (error) {
@@ -118,18 +121,63 @@ function App() {
     }
   };
   
-  // Загрузка данных из API WAQI
+  // Гибкая загрузка данных из API WAQI
   const loadWaqiData = async () => {
     if (!waqiApiToken) return;
     
     const newWaqiData = {};
     
-    for (const config of enterprisesConfig) {
+    for (const enterprise of enterprisesConfig) {
       try {
-        const data = await getWaqiData(config.waqiStationUid, waqiApiToken);
-        newWaqiData[config.enterpriseId] = data;
+        let data = null;
+        
+        // Пробуем получить данные по городу
+        if (enterprise.city) {
+          try {
+            const cityResult = await getWaqiDataByCity(enterprise.city, waqiApiToken);
+            if (cityResult.status === "ok") {
+              data = cityResult;
+            }
+          } catch (error) {
+            console.error(`Error fetching WAQI data for city ${enterprise.city}:`, error);
+          }
+        }
+        
+        // Пробуем получить данные по UID станции, если данные по городу недоступны
+        if (!data && enterprise.waqiStationUid) {
+          try {
+            const stationResult = await getWaqiDataByStationUID(enterprise.waqiStationUid, waqiApiToken);
+            if (stationResult.status === "ok") {
+              data = stationResult;
+            }
+          } catch (error) {
+            console.error(`Error fetching WAQI data for station ${enterprise.waqiStationUid}:`, error);
+          }
+        }
+        
+        // Если данные все еще не получены, пробуем найти станцию
+        if (!data && enterprise.city) {
+          try {
+            const searchResult = await searchWaqiStations(enterprise.city, waqiApiToken);
+            if (searchResult.status === "ok" && searchResult.data.length > 0) {
+              const firstStation = searchResult.data[0];
+              enterprise.waqiStationUid = firstStation.uid; // Сохраняем UID (в памяти)
+              
+              const stationResult = await getWaqiDataByStationUID(firstStation.uid, waqiApiToken);
+              if (stationResult.status === "ok") {
+                data = stationResult;
+              }
+            }
+          } catch (error) {
+            console.error(`Error searching WAQI stations for ${enterprise.city}:`, error);
+          }
+        }
+        
+        if (data) {
+          newWaqiData[enterprise.enterpriseId] = data;
+        }
       } catch (error) {
-        console.error(`Error fetching WAQI data for station ${config.waqiStationUid}:`, error);
+        console.error(`Error in WAQI data fetching process for enterprise ${enterprise.enterpriseId}:`, error);
       }
     }
     
@@ -231,6 +279,7 @@ function App() {
                   <th>ID</th>
                   <th>Название</th>
                   <th>Адрес</th>
+                  <th>Город</th>
                   <th>Станция WAQI</th>
                   <th>Отслеживаемые метрики</th>
                 </tr>
@@ -241,7 +290,8 @@ function App() {
                     <td>{enterprise.enterpriseId}</td>
                     <td>{enterprise.name}</td>
                     <td>{enterprise.enterpriseAddress.substring(0, 6)}...{enterprise.enterpriseAddress.substring(38)}</td>
-                    <td>{enterprise.waqiStationUid}</td>
+                    <td>{enterprise.city || '-'}</td>
+                    <td>{enterprise.waqiStationUid || 'Авто'}</td>
                     <td>{enterprise.metricsToCollect?.join(', ')}</td>
                   </tr>
                 ))}
@@ -249,23 +299,27 @@ function App() {
             </table>
           </div>
           
-          {loading ? (
-            <div>Загрузка данных...</div>
-          ) : (
-            <div className="enterprises-container">
-              {enterprises.map(enterprise => (
-                <EnterpriseCard
-                  key={enterprise.enterpriseId}
-                  enterprise={enterprise}
-                  ecoTokenContract={ecoTokenContract}
-                  ecoControlContract={ecoControlContract}
-                  waqiData={waqiData[enterprise.enterpriseId]}
-                  refreshData={refreshData}
-                  walletConnected={walletConnected}
-                />
-              ))}
-            </div>
-          )}
+          <div className="action-panel">
+            <button 
+              onClick={refreshData} 
+              className="btn refresh-btn"
+              disabled={loading}
+            >
+              {loading ? 'Загрузка...' : 'Обновить данные'}
+            </button>
+          </div>
+          
+          <div className="enterprises-grid">
+            {enterprises.map(enterprise => (
+              <EnterpriseCard 
+                key={enterprise.enterpriseId}
+                enterprise={enterprise}
+                waqiData={waqiData[enterprise.enterpriseId]}
+                contract={ecoControlContract}
+                refreshData={refreshData}
+              />
+            ))}
+          </div>
         </>
       )}
       
@@ -273,12 +327,13 @@ function App() {
       {walletConnected && activeTab === 'admin' && (
         <AdminPanel 
           ecoControlContract={ecoControlContract}
+          ecoTokenContract={ecoTokenContract}
           walletAddress={walletAddress}
           refreshData={refreshData}
         />
       )}
       
-      {/* Вкладка автоматической проверки */}
+      {/* Вкладка процессора данных */}
       {walletConnected && activeTab === 'processor' && (
         <OffchainProcessor 
           ecoControlContract={ecoControlContract}
@@ -288,22 +343,17 @@ function App() {
         />
       )}
       
-      {walletConnected && (
-        <button 
-          className="btn refresh-btn" 
-          onClick={refreshData} 
-          style={{ margin: '20px 0' }}
-        >
-          Обновить все данные
-        </button>
-      )}
-
+      {/* Стартовая страница */}
       {!walletConnected && (
-        <div className="welcome-message">
-          <h2>Добро пожаловать в панель управления экологическим контролем</h2>
-          <p>Пожалуйста, подключите кошелек MetaMask для доступа к функциям системы.</p>
+        <div className="welcome-section">
+          <h2>Добро пожаловать в систему экологического мониторинга</h2>
+          <p>Для начала работы подключите ваш кошелек MetaMask.</p>
         </div>
       )}
+      
+      <footer className="footer">
+        <p>EcoControl Smart Contract System | <a href="https://github.com/yourusername/eco-control" target="_blank" rel="noopener noreferrer">GitHub</a></p>
+      </footer>
     </div>
   );
 }

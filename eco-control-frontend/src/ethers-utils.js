@@ -116,8 +116,8 @@ export function getContracts(signer) {
   return { ecoControlContract, ecoTokenContract };
 }
 
-// Получить данные API WAQI для станции
-export async function getWaqiData(stationId, apiToken) {
+// Получить данные API WAQI для станции по UID
+export async function getWaqiDataByStationUID(stationId, apiToken) {
   try {
     const response = await fetch(`https://api.waqi.info/feed/@${stationId}/?token=${apiToken}`);
     if (!response.ok) {
@@ -126,9 +126,68 @@ export async function getWaqiData(stationId, apiToken) {
     const data = await response.json();
     return data;
   } catch (error) {
-    console.error("Failed to fetch WAQI data:", error);
+    console.error("Failed to fetch WAQI data by UID:", error);
     throw error;
   }
+}
+
+// Получить данные API WAQI для города 
+export async function getWaqiDataByCity(city, apiToken) {
+  try {
+    const response = await fetch(`https://api.waqi.info/feed/${encodeURIComponent(city)}/?token=${apiToken}`);
+    if (!response.ok) {
+      throw new Error(`HTTP error: ${response.status}`);
+    }
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error("Failed to fetch WAQI data by city:", error);
+    throw error;
+  }
+}
+
+// Поиск станций мониторинга по ключевому слову (городу)
+export async function searchWaqiStations(keyword, apiToken) {
+  try {
+    const response = await fetch(`https://api.waqi.info/search/?keyword=${encodeURIComponent(keyword)}&token=${apiToken}`);
+    if (!response.ok) {
+      throw new Error(`HTTP error: ${response.status}`);
+    }
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error("Failed to search WAQI stations:", error);
+    throw error;
+  }
+}
+
+// Сохраняем старую функцию для обратной совместимости
+export async function getWaqiData(stationId, apiToken) {
+  return getWaqiDataByStationUID(stationId, apiToken);
+}
+
+// Извлечь значения метрик из данных о качестве воздуха
+export function extractMetricsValues(airData, metrics) {
+  const result = {};
+  
+  if (!airData || !airData.iaqi) {
+    console.error("Air quality data is missing or does not contain metrics information");
+    return null;
+  }
+  
+  const iaqi = airData.iaqi;
+  
+  for (const metric of metrics) {
+    if (iaqi[metric] && typeof iaqi[metric].v !== 'undefined') {
+      // Округляем до целого числа и проверяем, что значение не отрицательное
+      result[metric] = Math.max(0, Math.round(iaqi[metric].v));
+    } else {
+      console.warn(`Metric "${metric}" is missing from data`);
+      result[metric] = 0; // Значение по умолчанию
+    }
+  }
+  
+  return result;
 }
 
 // Форматирование баланса с учетом decimals
@@ -141,13 +200,13 @@ export const enterprisesConfig = [
   {
     enterpriseId: 0,
     enterpriseAddress: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
-    waqiStationUid: 12899,
+    city: "London",
     metricsToCollect: ["pm25", "pm10"]
   },
   {
     enterpriseId: 1,
     enterpriseAddress: "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
-    waqiStationUid: 12725,
+    city: "New York",
     metricsToCollect: ["pm25", "pm10"]
   }
 ]; 

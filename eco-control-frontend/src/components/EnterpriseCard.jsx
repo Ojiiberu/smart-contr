@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { formatTokenBalance } from '../ethers-utils';
+import { ethers } from 'ethers';
 
 // Стили для компонента
 const cardStyle = {
@@ -45,47 +46,22 @@ const errorStyle = {
 
 function EnterpriseCard({ 
   enterprise, 
-  ecoTokenContract, 
-  ecoControlContract, 
+  contract, // Переименовали из ecoControlContract для краткости
   waqiData, 
-  refreshData,
-  walletConnected
+  refreshData 
 }) {
   const [metric1Limit, setMetric1Limit] = useState('');
   const [metric2Limit, setMetric2Limit] = useState('');
-  const [tokenBalance, setTokenBalance] = useState('0');
-  const [tokenSymbol, setTokenSymbol] = useState('ECO');
   const [isUpdatingLimits, setIsUpdatingLimits] = useState(false);
   const [isCheckingCompliance, setIsCheckingCompliance] = useState(false);
   const [error, setError] = useState('');
   
-  // Загрузка баланса токенов предприятия
-  useEffect(() => {
-    async function loadTokenData() {
-      if (ecoTokenContract && enterprise.enterpriseAddress) {
-        try {
-          const balance = await ecoTokenContract.balanceOf(enterprise.enterpriseAddress);
-          const decimals = await ecoTokenContract.decimals();
-          const symbol = await ecoTokenContract.symbol();
-          
-          setTokenBalance(formatTokenBalance(balance, decimals));
-          setTokenSymbol(symbol);
-        } catch (error) {
-          console.error("Failed to load token data:", error);
-          setError("Не удалось загрузить данные токена");
-        }
-      }
-    }
-    
-    loadTokenData();
-  }, [ecoTokenContract, enterprise.enterpriseAddress]);
-  
   // Загрузка текущих лимитов
   useEffect(() => {
     async function loadLimits() {
-      if (ecoControlContract && enterprise.enterpriseId !== undefined) {
+      if (contract && enterprise.enterpriseId !== undefined) {
         try {
-          const limits = await ecoControlContract.getEnterpriseLimits(enterprise.enterpriseId);
+          const limits = await contract.getEnterpriseLimits(enterprise.enterpriseId);
           setMetric1Limit(limits[0].toString());
           setMetric2Limit(limits[1].toString());
         } catch (error) {
@@ -96,11 +72,11 @@ function EnterpriseCard({
     }
     
     loadLimits();
-  }, [ecoControlContract, enterprise.enterpriseId]);
+  }, [contract, enterprise.enterpriseId]);
   
   // Обновление лимитов
   const updateLimits = async () => {
-    if (!walletConnected) {
+    if (!contract) {
       setError("Подключите кошелек для выполнения этой операции");
       return;
     }
@@ -109,7 +85,7 @@ function EnterpriseCard({
     setError('');
     
     try {
-      const tx = await ecoControlContract.setEnterpriseLimits(
+      const tx = await contract.setEnterpriseLimits(
         enterprise.enterpriseId,
         metric1Limit,
         metric2Limit
@@ -128,7 +104,7 @@ function EnterpriseCard({
   
   // Проверка соответствия
   const checkCompliance = async () => {
-    if (!walletConnected) {
+    if (!contract) {
       setError("Подключите кошелек для выполнения этой операции");
       return;
     }
@@ -138,22 +114,26 @@ function EnterpriseCard({
       return;
     }
     
-    const pm25Data = waqiData.data.iaqi.pm25;
-    const pm10Data = waqiData.data.iaqi.pm10;
+    // Получаем названия метрик из конфигурации предприятия
+    const metric1Name = enterprise.metricsToCollect ? enterprise.metricsToCollect[0] : 'pm25';
+    const metric2Name = enterprise.metricsToCollect ? enterprise.metricsToCollect[1] : 'pm10';
     
-    if (!pm25Data || !pm10Data) {
-      setError("Не хватает данных о загрязнении (PM2.5 или PM10)");
+    const metric1Data = waqiData.data.iaqi[metric1Name];
+    const metric2Data = waqiData.data.iaqi[metric2Name];
+    
+    if (!metric1Data || !metric2Data) {
+      setError(`Не хватает данных о загрязнении (${metric1Name} или ${metric2Name})`);
       return;
     }
     
-    const metric1Value = Math.round(pm25Data.v);
-    const metric2Value = Math.round(pm10Data.v);
+    const metric1Value = Math.round(metric1Data.v);
+    const metric2Value = Math.round(metric2Data.v);
     
     setIsCheckingCompliance(true);
     setError('');
     
     try {
-      const tx = await ecoControlContract.checkCompliance(
+      const tx = await contract.checkCompliance(
         enterprise.enterpriseId,
         metric1Value,
         metric2Value
@@ -185,86 +165,150 @@ function EnterpriseCard({
   // Получение текущих значений загрязнений из API waqi
   const getCurrentPollutionValues = () => {
     if (!waqiData || !waqiData.data || !waqiData.data.iaqi) {
-      return { pm25: 'Н/Д', pm10: 'Н/Д' };
+      return { metric1: 'Н/Д', metric2: 'Н/Д' };
     }
     
-    const pm25 = waqiData.data.iaqi.pm25 ? Math.round(waqiData.data.iaqi.pm25.v) : 'Н/Д';
-    const pm10 = waqiData.data.iaqi.pm10 ? Math.round(waqiData.data.iaqi.pm10.v) : 'Н/Д';
+    // Используем названия метрик из конфигурации предприятия
+    const metric1Name = enterprise.metricsToCollect ? enterprise.metricsToCollect[0] : 'pm25';
+    const metric2Name = enterprise.metricsToCollect ? enterprise.metricsToCollect[1] : 'pm10';
     
-    return { pm25, pm10 };
+    const metric1 = waqiData.data.iaqi[metric1Name] ? Math.round(waqiData.data.iaqi[metric1Name].v) : 'Н/Д';
+    const metric2 = waqiData.data.iaqi[metric2Name] ? Math.round(waqiData.data.iaqi[metric2Name].v) : 'Н/Д';
+    
+    return { metric1, metric2 };
   };
   
-  const { pm25, pm10 } = getCurrentPollutionValues();
+  const { metric1, metric2 } = getCurrentPollutionValues();
+  
+  // Получение названия метрик из конфигурации предприятия
+  const metric1Name = enterprise.metricsToCollect ? enterprise.metricsToCollect[0].toUpperCase() : 'PM2.5';
+  const metric2Name = enterprise.metricsToCollect ? enterprise.metricsToCollect[1].toUpperCase() : 'PM10';
+  
+  // Получение информации о станции
+  const getStationInfo = () => {
+    if (!waqiData || !waqiData.data) return 'Нет данных';
+    
+    // Название станции и город
+    const stationName = waqiData.data.city && waqiData.data.city.name 
+      ? waqiData.data.city.name 
+      : 'Неизвестная станция';
+    
+    // Время обновления
+    const time = waqiData.data.time && waqiData.data.time.s 
+      ? `(обновлено: ${waqiData.data.time.s})` 
+      : '';
+    
+    return `${stationName} ${time}`;
+  };
   
   return (
     <div style={cardStyle}>
-      <h2>{enterprise.name || `Предприятие ${enterprise.enterpriseId}`}</h2>
-      <p>Адрес: {enterprise.enterpriseAddress}</p>
+      <h2>{enterprise.name}</h2>
       
       <div style={sectionStyle}>
-        <h3>Баланс токенов</h3>
-        <p>{tokenBalance} {tokenSymbol}</p>
+        <h3>Информация о предприятии</h3>
+        <p><strong>ID:</strong> {enterprise.enterpriseId}</p>
+        <p><strong>Адрес контракта:</strong> {enterprise.enterpriseAddress}</p>
+        <p><strong>Город:</strong> {enterprise.city || 'Не указан'}</p>
+        <p><strong>Станция мониторинга:</strong> {enterprise.waqiStationUid || 'Автоматический выбор'}</p>
+        <p><strong>Метрики:</strong> {enterprise.metricsToCollect?.join(', ') || 'Не указаны'}</p>
       </div>
       
       <div style={sectionStyle}>
-        <h3>Лимиты загрязнения</h3>
+        <h3>Данные о загрязнении</h3>
+        
+        {waqiData ? (
+          <>
+            <p><strong>Источник данных:</strong> {getStationInfo()}</p>
+            <p>
+              <strong>{metric1Name}:</strong> 
+              <span style={{ color: getPollutionColor(metric1, metric1Limit) }}>
+                {' '}{metric1} (лимит: {metric1Limit})
+              </span>
+            </p>
+            <p>
+              <strong>{metric2Name}:</strong> 
+              <span style={{ color: getPollutionColor(metric2, metric2Limit) }}>
+                {' '}{metric2} (лимит: {metric2Limit})
+              </span>
+            </p>
+          </>
+        ) : (
+          <p>Загрузка данных о загрязнении...</p>
+        )}
+      </div>
+      
+      <div style={sectionStyle}>
+        <h3>Последние данные в смарт-контракте</h3>
+        <p><strong>Время обновления:</strong> {formatDate(enterprise.latestDataTimestamp)}</p>
+        <p>
+          <strong>{metric1Name}:</strong> 
+          <span style={{ color: getPollutionColor(enterprise.latestMetric1, metric1Limit) }}>
+            {' '}{enterprise.latestMetric1} (лимит: {metric1Limit})
+          </span>
+        </p>
+        <p>
+          <strong>{metric2Name}:</strong> 
+          <span style={{ color: getPollutionColor(enterprise.latestMetric2, metric2Limit) }}>
+            {' '}{enterprise.latestMetric2} (лимит: {metric2Limit})
+          </span>
+        </p>
+      </div>
+      
+      <div style={sectionStyle}>
+        <h3>Управление лимитами</h3>
         <div>
-          <label>PM2.5 (мкг/м³): </label>
-          <input 
-            type="number" 
-            value={metric1Limit} 
-            onChange={(e) => setMetric1Limit(e.target.value)}
-            style={inputStyle}
-          />
+          <label>
+            Лимит {metric1Name}:
+            <input
+              type="number"
+              value={metric1Limit}
+              onChange={e => setMetric1Limit(e.target.value)}
+              style={inputStyle}
+            />
+          </label>
+          <label>
+            Лимит {metric2Name}:
+            <input
+              type="number"
+              value={metric2Limit}
+              onChange={e => setMetric2Limit(e.target.value)}
+              style={inputStyle}
+            />
+          </label>
+          <button
+            onClick={updateLimits}
+            disabled={isUpdatingLimits}
+            style={buttonStyle}
+          >
+            {isUpdatingLimits ? 'Обновление...' : 'Обновить лимиты'}
+          </button>
         </div>
-        <div>
-          <label>PM10 (мкг/м³): </label>
-          <input 
-            type="number" 
-            value={metric2Limit} 
-            onChange={(e) => setMetric2Limit(e.target.value)}
-            style={inputStyle}
-          />
-        </div>
-        <button 
-          onClick={updateLimits} 
-          disabled={isUpdatingLimits || !walletConnected}
+      </div>
+      
+      <div style={sectionStyle}>
+        <h3>Проверка соответствия</h3>
+        <button
+          onClick={checkCompliance}
+          disabled={isCheckingCompliance || !waqiData}
           style={buttonStyle}
         >
-          {isUpdatingLimits ? 'Обновление...' : 'Обновить лимиты'}
+          {isCheckingCompliance ? 'Проверка...' : 'Проверить соответствие'}
         </button>
+        
+        {waqiData && metric1 !== 'Н/Д' && metric2 !== 'Н/Д' && (
+          <p>
+            Текущие данные: {metric1Name}={metric1}, {metric2Name}={metric2}
+            {parseInt(metric1) > parseInt(metric1Limit) || parseInt(metric2) > parseInt(metric2Limit) ? (
+              <span style={warningStyle}> (Превышение лимитов!)</span>
+            ) : (
+              <span style={{ color: 'green' }}> (В пределах нормы)</span>
+            )}
+          </p>
+        )}
       </div>
       
-      <div style={sectionStyle}>
-        <h3>Текущие показатели загрязнения (API)</h3>
-        <p>
-          PM2.5: <span style={{ color: getPollutionColor(pm25, metric1Limit) }}>{pm25} мкг/м³</span>
-          {pm25 !== 'Н/Д' && metric1Limit && parseInt(pm25) > parseInt(metric1Limit) && 
-            <span style={warningStyle}> (Превышение!)</span>}
-        </p>
-        <p>
-          PM10: <span style={{ color: getPollutionColor(pm10, metric2Limit) }}>{pm10} мкг/м³</span>
-          {pm10 !== 'Н/Д' && metric2Limit && parseInt(pm10) > parseInt(metric2Limit) && 
-            <span style={warningStyle}> (Превышение!)</span>}
-        </p>
-      </div>
-      
-      <div style={sectionStyle}>
-        <h3>Последние проверенные данные (Блокчейн)</h3>
-        <p>PM2.5: {enterprise.latestMetric1 || 'Нет данных'} мкг/м³</p>
-        <p>PM10: {enterprise.latestMetric2 || 'Нет данных'} мкг/м³</p>
-        <p>Дата проверки: {formatDate(enterprise.latestDataTimestamp)}</p>
-      </div>
-      
-      <button 
-        onClick={checkCompliance} 
-        disabled={isCheckingCompliance || !walletConnected}
-        style={buttonStyle}
-      >
-        {isCheckingCompliance ? 'Проверка...' : 'Запустить проверку соответствия'}
-      </button>
-      
-      {error && <p style={errorStyle}>{error}</p>}
+      {error && <div style={errorStyle}>{error}</div>}
     </div>
   );
 }

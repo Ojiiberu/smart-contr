@@ -1,13 +1,106 @@
-# Sample Hardhat Project
+# EcoControl Smart Contract System
 
-This project demonstrates a basic Hardhat use case. It comes with a sample contract, a test for that contract, and a Hardhat Ignition module that deploys that contract.
+## Описание проекта
+MVP версия приложения для надзора за выбросами вблизи предприятий. Смарт-контракт прописывает условия, по которым предприятиям начисляется штраф за превышение допустимых норм загрязнения.
 
-Try running some of the following tasks:
+## Структура проекта
+- `contracts/` - Смарт-контракты Solidity
+  - `EcoControl.sol` - Основной контракт для контроля за выбросами
+  - `EcoToken.sol` - Токен для штрафов
+- `scripts/` - Скрипты для деплоя и управления контрактами
+- `offchain-processor.js` - Оракул для получения данных о качестве воздуха и вызова контракта
+- `eco-control-frontend/` - Фронтенд приложения
 
-```shell
-npx hardhat help
-npx hardhat test
-REPORT_GAS=true npx hardhat test
+## Оракул (offchain-processor.js)
+
+Скрипт-оракул является ключевой частью системы и выполняет следующие функции:
+1. Получает данные о качестве воздуха из API WAQI (World Air Quality Index)
+2. Обрабатывает полученные данные
+3. Передает данные в смарт-контракт для проверки соответствия нормам
+4. Автоматически начисляет штрафы при превышении лимитов
+
+### Особенности оракула:
+- **Гибкий сбор данных** - поддерживает несколько методов получения данных:
+  - Прямой запрос по названию города
+  - Запрос по UID станции мониторинга
+  - Автоматический поиск ближайших станций по названию города
+- **Поддержка командной строки** - можно указать свои города прямо при запуске:
+  ```
+  node offchain-processor.js "Paris" "Berlin" "Tokyo"
+  ```
+
+### Настройка оракула:
+1. В файле `.env` указать:
+   ```
+   DATA_PROCESSOR_PRIVATE_KEY=<приватный_ключ>
+   WAQI_API_TOKEN=e73f3d29e99717ea5cb981aaa8748cdbc44c5e27
+   ```
+
+2. В файле `offchain-processor.js` настроить конфигурацию предприятий по умолчанию:
+   ```javascript
+   const defaultConfig = [
+     {
+       enterpriseId: 0,
+       enterpriseAddress: "<адрес_предприятия>",
+       city: "London", // Название города
+       metricsToCollect: ["pm25", "pm10"]
+     },
+     // Добавить другие предприятия по необходимости
+   ];
+   ```
+
+### Запуск оракула:
+```bash
+# Использование конфигурации по умолчанию
+node offchain-processor.js
+
+# Использование пользовательских городов
+node offchain-processor.js "Paris" "Berlin" "Tokyo"
+```
+
+## Фронтенд приложения
+
+Фронтенд позволяет:
+1. Подключать кошелек MetaMask
+2. Просматривать данные о качестве воздуха для предприятий
+3. Обновлять лимиты загрязнения
+4. Запускать проверки соответствия вручную
+5. **Новая функция!** Проверять качество воздуха в любых городах мира
+
+### Проверка качества воздуха по городу:
+1. Откройте вкладку "Автоматическая проверка"
+2. Введите название города в поле ввода
+3. Нажмите кнопку "Добавить"
+4. Добавьте несколько городов, если нужно
+5. Нажмите "Получить данные о качестве воздуха"
+6. Результаты отобразятся на странице с информацией о PM2.5, PM10 и AQI
+
+## Установка и настройка
+
+1. Установить зависимости:
+```bash
+npm install
+cd eco-control-frontend
+npm install
+```
+
+2. Запустить локальную сеть Hardhat:
+```bash
 npx hardhat node
-npx hardhat ignition deploy ./ignition/modules/Lock.js
+```
+
+3. Развернуть контракты:
+```bash
+npx hardhat run scripts/deploy.js --network localhost
+```
+
+4. Запустить оракул:
+```bash
+node offchain-processor.js
+```
+
+5. Запустить фронтенд:
+```bash
+cd eco-control-frontend
+npm run dev
 ```
