@@ -296,6 +296,14 @@ contract EcoControl {
           return (enterprise.latestDataTimestamp, enterprise.latestMetric1, enterprise.latestMetric2);
      }
 
+     // Функция для проверки превышения лимитов
+     function checkLimitsExceeded(uint256 _enterpriseId, uint256 _metric1Value, uint256 _metric2Value) public view returns (bool) {
+          require(_enterpriseId < nextEnterpriseId, "Enterprise with this ID does not exist");
+          Enterprise storage enterprise = enterprises[_enterpriseId];
+          // Возвращаем true, если хотя бы один из лимитов превышен
+          return (_metric1Value > enterprise.metric1Limit || _metric2Value > enterprise.metric2Limit);
+     }
+
      function getCollectedFinesBalance() public view returns (uint256) {
         if (ecoTokenAddress == address(0)) {
             return 0;

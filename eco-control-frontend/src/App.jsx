@@ -257,12 +257,6 @@ function App() {
           >
             Автоматическая проверка
           </button>
-          <button 
-            className={`tab-btn ${activeTab === 'admin' ? 'active' : ''}`}
-            onClick={() => setActiveTab('admin')}
-          >
-            Администрирование
-          </button>
         </div>
       )}
       
@@ -352,7 +346,7 @@ function App() {
       )}
       
       <footer className="footer">
-        <p>EcoControl Smart Contract System | <a href="https://github.com/yourusername/eco-control" target="_blank" rel="noopener noreferrer">GitHub</a></p>
+        <p>EcoControl Smart Contract System | <a href="https://github.com/Ojiiberu/smart-contr" target="_blank" rel="noopener noreferrer">GitHub</a></p>
       </footer>
     </div>
   );

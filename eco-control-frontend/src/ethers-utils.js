@@ -14,6 +14,7 @@ export const EcoControlABI = [
   // Методы для управления параметрами
   "function setEnterpriseLimits(uint256 _enterpriseId, uint256 _metric1Limit, uint256 _metric2Limit)",
   "function checkCompliance(uint256 _enterpriseId, uint256 _metric1Value, uint256 _metric2Value)",
+  "function checkLimitsExceeded(uint256 _enterpriseId, uint256 _metric1Value, uint256 _metric2Value) view returns (bool)",
   
   // Административные методы
   "function owner() view returns (address)",

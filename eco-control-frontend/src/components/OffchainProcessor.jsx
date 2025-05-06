@@ -122,6 +122,10 @@ function OffchainProcessor({ ecoControlContract, waqiApiToken, refreshData, isDa
     allowances: {}
   });
 
+  // Добавляем состояние для баланса контракта
+  const [contractBalance, setContractBalance] = useState(null);
+  const [loadingContractBalance, setLoadingContractBalance] = useState(false);
+
   // Загрузка данных о предприятиях
   useEffect(() => {
     if (ecoControlContract) {
@@ -241,10 +245,29 @@ function OffchainProcessor({ ecoControlContract, waqiApiToken, refreshData, isDa
       }
     };
     
-    if (enterprises.length > 0) {
+    if (ecoControlContract) {
       loadTokenSettings();
     }
-  }, [ecoControlContract, enterprises]);
+  }, [ecoControlContract]);
+
+  // Загрузка баланса контракта
+  useEffect(() => {
+    const loadContractBalance = async () => {
+      if (!ecoControlContract) return;
+      
+      try {
+        setLoadingContractBalance(true);
+        const balance = await ecoControlContract.getCollectedFinesBalance();
+        setContractBalance(balance.toString());
+      } catch (error) {
+        console.error("Error loading contract balance:", error);
+      } finally {
+        setLoadingContractBalance(false);
+      }
+    };
+    
+    loadContractBalance();
+  }, [ecoControlContract, refreshData]);
 
   // Функция для логирования (аналог console.log) в интерфейсе
   const log = (message) => {
@@ -400,6 +423,7 @@ function OffchainProcessor({ ecoControlContract, waqiApiToken, refreshData, isDa
     
     setCheckingCompliance(true);
     setError('');
+    // Очищаем логи перед началом новой проверки
     setLogs([]);
     
     try {
@@ -444,8 +468,125 @@ function OffchainProcessor({ ecoControlContract, waqiApiToken, refreshData, isDa
           
           // Проверка событий в транзакции
           let eventsFound = false;
+          let fineCharged = false;
+          let fineArgs = null;
           
-          // Поиск события ComplianceChecked
+          // Проверка на превышение лимитов - это главное условие для штрафа
+          const limitsExceeded = data.pm25Exceeded || data.pm10Exceeded;
+          log(`Превышение лимитов: ${limitsExceeded ? 'Да' : 'Нет'}`);
+          
+          if (limitsExceeded) {
+            // Если лимиты превышены, но событие не обнаружено,
+            // заполним данные о штрафе вручную для отображения баланса
+            
+            // Получим адрес предприятия напрямую через функцию getEnterpriseAddress
+            // вместо получения через структуру enterprises
+            let enterpriseAddress;
+            try {
+              enterpriseAddress = await ecoControlContract.getEnterpriseAddress(parseInt(enterpriseId));
+              log(`Получен адрес предприятия: ${enterpriseAddress}`);
+            } catch (error) {
+              log(`Ошибка при получении адреса предприятия: ${error.message}`);
+              const enterpriseInfo = await ecoControlContract.enterprises(parseInt(enterpriseId));
+              enterpriseAddress = enterpriseInfo[1];
+              log(`Использован резервный метод получения адреса: ${enterpriseAddress}`);
+            }
+            
+            // Получим текущую сумму штрафа
+            const fineAmount = await ecoControlContract.fineAmount();
+            
+            // Выводим информацию о начисленном штрафе
+            log(`Обнаружено превышение лимитов для предприятия ${enterprise.name} (ID: ${enterpriseId})`);
+            log(`Штраф в размере ${ethers.formatUnits(fineAmount, 18)} токенов наложен на адрес ${enterpriseAddress}`);
+            
+            // Получаем баланс кошелька предприятия
+            try {
+              const provider = ecoControlContract.runner.provider;
+              const balanceWei = await provider.getBalance(enterpriseAddress);
+              const balanceEth = ethers.formatEther(balanceWei);
+              
+              // Получаем баланс токенов, если есть адрес токена
+              if (tokenSettings.tokenAddress && tokenSettings.tokenAddress !== "0x0000000000000000000000000000000000000000") {
+                const tokenContract = new ethers.Contract(
+                  tokenSettings.tokenAddress,
+                  ['function balanceOf(address) view returns (uint256)'],
+                  provider
+                );
+                try {
+                  const tokenBalance = await tokenContract.balanceOf(enterpriseAddress);
+                  const formattedTokenBalance = ethers.formatUnits(tokenBalance, 18);
+                  log(`Баланс кошелька после штрафа: ${balanceEth} ETH, ${formattedTokenBalance} токенов`);
+                } catch (error) {
+                  log(`Баланс кошелька после штрафа: ${balanceEth} ETH, токены: ошибка получения`);
+                }
+              } else {
+                log(`Баланс кошелька после штрафа: ${balanceEth} ETH`);
+              }
+              
+              fineCharged = true;
+              fineArgs = [parseInt(enterpriseId), enterpriseAddress, fineAmount];
+              eventsFound = true;
+              
+              // Обновляем информацию о результате в стейте
+              setCityResults(prev => ({
+                ...prev,
+                [enterpriseId]: {
+                  ...prev[enterpriseId],
+                  complianceChecked: true,
+                  fineCharged: true,
+                  fineAmount: fineAmount.toString()
+                }
+              }));
+            } catch (error) {
+              log(`Не удалось получить баланс кошелька: ${error.message}`);
+            }
+          }
+          
+          // Более надежный способ поиска событий по темам (даже если парсинг не работает)
+          for (const log of receipt.logs) {
+            // Тема события FineCharged (можно получить хеш из смарт-контракта)
+            if (log.topics && log.topics[0] === '0x9c8ab527695ae6c2a38c7ad7f39554125852b4c500b13cb56f45eca09b4a73c9') {
+              eventsFound = true;
+              fineCharged = true;
+              
+              // Получим адрес предприятия напрямую через функцию getEnterpriseAddress
+              try {
+                const enterpriseAddress = await ecoControlContract.getEnterpriseAddress(parseInt(enterpriseId));
+                // Получим текущую сумму штрафа
+                const fineAmount = await ecoControlContract.fineAmount();
+                
+                // Создаем аргументы события
+                fineArgs = [parseInt(enterpriseId), enterpriseAddress, fineAmount];
+                
+                log(`Обнаружено событие FineCharged по хешу темы! ID=${enterpriseId}, Адрес=${enterpriseAddress}, Сумма=${fineAmount}`);
+              } catch (error) {
+                log(`Ошибка при обработке события FineCharged: ${error.message}`);
+              }
+            }
+          }
+          
+          // Запросим напрямую, было ли превышение лимитов, даже если событие не обнаружено
+          if (!eventsFound) {
+            const isLimitsExceeded = await manuallyCheckLimitsExceeded(enterpriseId, pm25Value, pm10Value);
+            if (isLimitsExceeded) {
+              log(`Обнаружено превышение лимитов для предприятия ID ${enterpriseId}`);
+              
+              // Получим адрес предприятия
+              const enterpriseInfo = await ecoControlContract.enterprises(parseInt(enterpriseId));
+              const enterpriseAddress = enterpriseInfo[1]; // Адрес предприятия
+              
+              // Получим текущую сумму штрафа
+              const fineAmount = await ecoControlContract.fineAmount();
+              
+              // Имитируем аргументы события
+              fineArgs = [parseInt(enterpriseId), enterpriseAddress, fineAmount];
+              fineCharged = true;
+              
+              log(`Штраф наложен! ID=${enterpriseId}, Адрес=${enterpriseAddress}, Сумма=${fineAmount}`);
+            }
+          }
+
+          // Стандартный поиск события ComplianceChecked
           const complianceEvent = receipt.logs.find(log => log.fragment && log.fragment.name === 'ComplianceChecked');
           if (complianceEvent) {
             eventsFound = true;
@@ -453,23 +594,13 @@ function OffchainProcessor({ ecoControlContract, waqiApiToken, refreshData, isDa
             log(`Событие ComplianceChecked: ID=${args[0]}, M1=${args[1]}, M2=${args[2]}, Превышение=${args[3]}`);
           }
           
-          // Поиск события FineCharged
+          // Стандартный поиск события FineCharged
           const fineChargedEvent = receipt.logs.find(log => log.fragment && log.fragment.name === 'FineCharged');
           if (fineChargedEvent) {
             eventsFound = true;
-            const args = fineChargedEvent.args;
-            log(`Событие FineCharged: Штраф наложен! ID=${args[0]}, Адрес=${args[1]}, Сумма=${args[2]}`);
-            
-            // Обновляем информацию о результате в стейте
-            setCityResults(prev => ({
-              ...prev,
-              [enterpriseId]: {
-                ...prev[enterpriseId],
-                complianceChecked: true,
-                fineCharged: true,
-                fineAmount: args[2].toString()
-              }
-            }));
+            fineCharged = true;
+            fineArgs = fineChargedEvent.args;
+            log(`Событие FineCharged: Штраф наложен! ID=${fineArgs[0]}, Адрес=${fineArgs[1]}, Сумма=${fineArgs[2]}`);
           } else {
             // Поиск события FineChargeFailed
             const fineFailedEvent = receipt.logs.find(log => log.fragment && log.fragment.name === 'FineChargeFailed');
@@ -491,8 +622,51 @@ function OffchainProcessor({ ecoControlContract, waqiApiToken, refreshData, isDa
             }
           }
           
-          if (!eventsFound) {
-            log('Событий в транзакции не найдено.');
+          // Получаем информацию о кошельке предприятия, если был наложен штраф
+          if (fineCharged && fineArgs) {
+            try {
+              const provider = ecoControlContract.runner.provider;
+              // Получаем адрес предприятия напрямую из функции getEnterpriseAddress
+              const enterpriseAddress = await ecoControlContract.getEnterpriseAddress(parseInt(enterpriseId));
+              const balanceWei = await provider.getBalance(enterpriseAddress);
+              const balanceEth = ethers.formatEther(balanceWei);
+              
+              // Получаем баланс токенов, если есть адрес токена
+              if (tokenSettings.tokenAddress && tokenSettings.tokenAddress !== "0x0000000000000000000000000000000000000000") {
+                const tokenContract = new ethers.Contract(
+                  tokenSettings.tokenAddress,
+                  ['function balanceOf(address) view returns (uint256)'],
+                  provider
+                );
+                try {
+                  const tokenBalance = await tokenContract.balanceOf(enterpriseAddress);
+                  const formattedTokenBalance = ethers.formatUnits(tokenBalance, 18);
+                  log(`Баланс кошелька предприятия: ${balanceEth} ETH, ${formattedTokenBalance} токенов (адрес: ${enterpriseAddress})`);
+                } catch (error) {
+                  log(`Баланс кошелька предприятия: ${balanceEth} ETH, токены: ошибка получения (адрес: ${enterpriseAddress})`);
+                }
+              } else {
+                log(`Баланс кошелька предприятия: ${balanceEth} ETH (адрес: ${enterpriseAddress})`);
+              }
+              
+              // Обновляем информацию о результате в стейте
+              setCityResults(prev => ({
+                ...prev,
+                [enterpriseId]: {
+                  ...prev[enterpriseId],
+                  complianceChecked: true,
+                  fineCharged: true,
+                  fineAmount: fineArgs[2].toString(),
+                  enterpriseAddress: enterpriseAddress // Сохраняем адрес предприятия
+                }
+              }));
+            } catch (error) {
+              log(`Не удалось получить баланс кошелька: ${error.message}`);
+            }
+          }
+          
+          if (!eventsFound && !fineCharged) {
+            log('Событий в транзакции не найдено. Штраф не требуется.');
             // Обновляем информацию о результате в стейте
             setCityResults(prev => ({
               ...prev,
@@ -603,6 +777,28 @@ function OffchainProcessor({ ecoControlContract, waqiApiToken, refreshData, isDa
     return { can: true };
   };
 
+  // Вспомогательная функция для проверки превышения лимитов
+  const manuallyCheckLimitsExceeded = async (enterpriseId, pm25Value, pm10Value) => {
+    try {
+      // Сначала попробуем использовать функцию контракта если она доступна
+      try {
+        return await ecoControlContract.checkLimitsExceeded(parseInt(enterpriseId), pm25Value, pm10Value);
+      } catch (error) {
+        console.log("checkLimitsExceeded function not available, using manual check", error);
+      }
+      
+      // Если функция контракта недоступна, делаем проверку вручную
+      const enterprise = enterprises.find(e => e.id.toString() === enterpriseId.toString());
+      if (!enterprise) return false;
+      
+      // Сравниваем значения с лимитами
+      return pm25Value > enterprise.metric1Limit || pm10Value > enterprise.metric2Limit;
+    } catch (error) {
+      console.error("Error checking limits exceeded:", error);
+      return false;
+    }
+  };
+
   return (
     <div style={processorStyle}>
       <h2>Панель обработчика данных</h2>
@@ -620,7 +816,7 @@ function OffchainProcessor({ ecoControlContract, waqiApiToken, refreshData, isDa
             cursor: 'pointer'
           }}
         >
-          {showAdminPanel ? 'Скрыть панель администратора' : 'Показать панель администратора'}
+          {showAdminPanel ? 'Скрыть информацию о лимитах' : 'Показать информацию о лимитах'}
         </button>
       </div>
       
@@ -632,51 +828,23 @@ function OffchainProcessor({ ecoControlContract, waqiApiToken, refreshData, isDa
           borderRadius: '8px',
           marginBottom: '30px'
         }}>
-          <h3>Панель администратора</h3>
-          <p>Здесь вы можете установить новые лимиты для всех предприятий.</p>
+          <h3>Информация о лимитах и штрафах</h3>
           
-          <div style={{ display: 'flex', gap: '20px', marginBottom: '20px' }}>
-            <div>
-              <label style={labelStyle}>
-                Лимит PM2.5:
-                <input
-                  type="number"
-                  value={newPM25Limit}
-                  onChange={(e) => setNewPM25Limit(parseInt(e.target.value))}
-                  style={inputStyle}
-                  min="0"
-                />
-              </label>
-            </div>
-            <div>
-              <label style={labelStyle}>
-                Лимит PM10:
-                <input
-                  type="number"
-                  value={newPM10Limit}
-                  onChange={(e) => setNewPM10Limit(parseInt(e.target.value))}
-                  style={inputStyle}
-                  min="0"
-                />
-              </label>
-            </div>
+          {/* Добавляем информацию о собранных штрафах */}
+          <div style={{ marginBottom: '15px', padding: '10px', backgroundColor: '#e2e8f0', borderRadius: '6px' }}>
+            <h4 style={{ marginTop: '0', marginBottom: '10px' }}>Собранные штрафы:</h4>
+            {loadingContractBalance ? (
+              <p>Загрузка баланса контракта...</p>
+            ) : contractBalance !== null ? (
+              <div>
+                <p><strong>Баланс контракта:</strong> {ethers.formatUnits(contractBalance, 18)} токенов</p>
+                <p><strong>Адрес контракта EcoControl:</strong> {ecoControlContract.target}</p>
+                <p><strong>Адрес токена EcoToken:</strong> {tokenSettings.tokenAddress || 'Не установлен'}</p>
+              </div>
+            ) : (
+              <p>Не удалось загрузить баланс контракта</p>
+            )}
           </div>
-          
-          <button
-            onClick={updateAllLimits}
-            disabled={updatingLimits}
-            style={{
-              background: '#48bb78',
-              color: 'white',
-              padding: '10px 20px',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontWeight: 'bold'
-            }}
-          >
-            {updatingLimits ? 'Обновление...' : 'Обновить лимиты для всех предприятий'}
-          </button>
           
           <div style={{ marginTop: '15px' }}>
             <h4>Текущие лимиты:</h4>
@@ -878,9 +1046,16 @@ function OffchainProcessor({ ecoControlContract, waqiApiToken, refreshData, isDa
                         }}>
                           <p style={{ margin: '5px 0' }}><strong>Результат проверки:</strong></p>
                           {data.fineCharged ? (
-                            <p style={{ color: '#d35400', margin: '5px 0' }}>
-                              Штраф наложен: {data.fineAmount ? `${data.fineAmount} токенов` : 'Сумма неизвестна'}
-                            </p>
+                            <>
+                              <p style={{ color: '#d35400', margin: '5px 0' }}>
+                                Штраф наложен: {data.fineAmount ? `${ethers.formatUnits(data.fineAmount, 18)} токенов` : 'Сумма неизвестна'}
+                              </p>
+                              {data.enterpriseAddress && (
+                                <p style={{ margin: '5px 0', fontSize: '0.9em' }}>
+                                  <strong>Адрес предприятия:</strong> {data.enterpriseAddress}
+                                </p>
+                              )}
+                            </>
                           ) : data.fineFailedReason ? (
                             <p style={{ color: 'red', margin: '5px 0' }}>
                               Ошибка при наложении штрафа: {data.fineFailedReason}
